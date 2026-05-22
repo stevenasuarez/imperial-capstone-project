@@ -1,5 +1,5 @@
 # src/main.py
-# BBO Capstone - Full Query Strategy (Rounds 1-5)
+# BBO Capstone - Full Query Strategy (Rounds 1-8)
 # Imperial College / Emeritus PCMLAI Capstone
 #
 # USAGE:
@@ -7,6 +7,9 @@
 #   python main.py --round 3   → generate Round 3 (SVM-guided)
 #   python main.py --round 4   → generate Round 4 (numpy NN surrogate)
 #   python main.py --round 5   → generate Round 5 (PyTorch surrogate + autograd)
+#   python main.py --round 6   → generate Round 6 (PyTorch + dimension-aware pooling)
+#   python main.py --round 7   → generate Round 7 (PyTorch + hyperparameter grid search)
+#   python main.py --round 8   → generate Round 8 (PyTorch + attention-weighted gradient)
 #   python main.py             → runs all rounds in sequence
 #
 # REQUIREMENTS:
@@ -15,7 +18,7 @@
 import argparse
 import numpy as np
 import os
-from data_loader import round1, round2, round3, round4
+from data_loader import round1, round2, round3, round4, round5, round6, round7
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 
@@ -39,12 +42,6 @@ def run_round2():
 
 # ═══════════════════════════════════════════════════════════════
 # ROUND 3 — SVM-guided search
-#
-# Strategy:
-#   - Label Round 1 as 0 (baseline) and Round 2 as 1 (improved)
-#   - Train a linear SVM to find the decision boundary
-#   - Extract the SVM weight vector as a direction of improvement
-#   - Step from Round 2 along that direction to propose Round 3
 # ═══════════════════════════════════════════════════════════════
 
 def generate_round3_svm(r1, r2, step_scale=0.5):
@@ -83,12 +80,6 @@ def run_round3():
 
 # ═══════════════════════════════════════════════════════════════
 # ROUND 4 — Numpy NN surrogate + manual backpropagation
-#
-# Strategy:
-#   - Assign synthetic labels: R1=0.0, R2=0.5, R3=1.0
-#   - Train a small NN from scratch using numpy
-#   - Use manual backpropagation to compute d(output)/d(input)
-#   - Step from Round 3 along that gradient to propose Round 4
 # ═══════════════════════════════════════════════════════════════
 
 def sigmoid(x):
@@ -106,12 +97,6 @@ def relu_deriv(x):
 
 
 class SurrogateNN:
-    """
-    Fully-connected NN built from scratch with numpy only.
-    Architecture: Input(dim) -> Hidden(16, ReLU) -> Hidden(8, ReLU) -> Output(1, Sigmoid)
-    Trained with MSE loss and standard gradient descent.
-    input_gradient() uses manual backpropagation to compute d(output)/d(input).
-    """
     def __init__(self, input_dim, lr=0.05, epochs=3000):
         self.lr = lr
         self.epochs = epochs
@@ -191,18 +176,6 @@ def run_round4():
 
 # ═══════════════════════════════════════════════════════════════
 # ROUND 5 — PyTorch surrogate + autograd gradient search
-#
-# Strategy:
-#   - Upgrade the surrogate to PyTorch, which handles all
-#     gradient computation automatically via autograd
-#   - Train on all 4 rounds with synthetic progressive labels:
-#     R1=0.0, R2=0.33, R3=0.67, R4=1.0
-#   - After training, use torch.autograd to compute
-#     d(output)/d(input) at Round 4 — no manual backprop needed
-#   - Deeper architecture (32→16→8→1) to better capture
-#     non-linearities as the dataset grows to 4 points
-#   - Adam optimiser for faster, more stable convergence
-#     vs plain gradient descent used in Round 4
 # ═══════════════════════════════════════════════════════════════
 
 def run_round5():
@@ -215,30 +188,14 @@ def run_round5():
         import torch.nn as nn
 
         class PyTorchSurrogate(nn.Module):
-            """
-            Deeper surrogate network built with PyTorch.
-            Architecture: Input(dim) -> 32 -> 16 -> 8 -> Output(1)
-            Activations: ReLU throughout, Sigmoid on output.
-
-            Using PyTorch means:
-            - No manual backpropagation code needed
-            - torch.autograd handles all gradient computation
-            - Adam optimiser gives adaptive learning rates
-            - Easy to scale architecture without rewriting math
-            """
             def __init__(self, input_dim):
                 super().__init__()
                 self.net = nn.Sequential(
-                    nn.Linear(input_dim, 32),
-                    nn.ReLU(),
-                    nn.Linear(32, 16),
-                    nn.ReLU(),
-                    nn.Linear(16, 8),
-                    nn.ReLU(),
-                    nn.Linear(8, 1),
-                    nn.Sigmoid()
+                    nn.Linear(input_dim, 32), nn.ReLU(),
+                    nn.Linear(32, 16), nn.ReLU(),
+                    nn.Linear(16, 8), nn.ReLU(),
+                    nn.Linear(8, 1), nn.Sigmoid()
                 )
-
             def forward(self, x):
                 return self.net(x)
 
@@ -249,45 +206,21 @@ def run_round5():
             p3 = np.array(round3[key], dtype=np.float32)
             p4 = np.array(round4[key], dtype=np.float32)
             dim = len(p1)
-
-            # Training data: 4 rounds, progressive synthetic labels
-            X_np = np.array([p1, p2, p3, p4], dtype=np.float32)
-            y_np = np.array([[0.0], [0.33], [0.67], [1.0]], dtype=np.float32)
-
-            X_t = torch.tensor(X_np)
-            y_t = torch.tensor(y_np)
-
-            # Build and train PyTorch model
+            X_t = torch.tensor(np.array([p1,p2,p3,p4], dtype=np.float32))
+            y_t = torch.tensor(np.array([[0.0],[0.33],[0.67],[1.0]], dtype=np.float32))
             torch.manual_seed(42)
             model = PyTorchSurrogate(input_dim=dim)
-            optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
+            opt = torch.optim.Adam(model.parameters(), lr=0.01)
             loss_fn = nn.MSELoss()
-
-            for epoch in range(5000):
-                optimiser.zero_grad()
-                pred = model(X_t)
-                loss = loss_fn(pred, y_t)
-                loss.backward()   # PyTorch autograd — no manual math needed
-                optimiser.step()
-
-            # Compute input gradient at Round 4 point using autograd
-            # requires_grad=True tells PyTorch to track this tensor
-            x_query = torch.tensor(p4, dtype=torch.float32,
-                                   requires_grad=True)
-            output = model(x_query.unsqueeze(0))
-            output.backward()  # autograd computes d(output)/d(x_query)
-            grad = x_query.grad.numpy()  # gradient of output w.r.t. each input dim
-
-            # Step along gradient from Round 4 to propose Round 5
+            for _ in range(5000):
+                opt.zero_grad(); loss_fn(model(X_t), y_t).backward(); opt.step()
+            x_query = torch.tensor(p4, dtype=torch.float32, requires_grad=True)
+            model(x_query.unsqueeze(0)).backward()
+            grad = x_query.grad.numpy()
             grad_norm = grad / (np.linalg.norm(grad) + 1e-8)
-            avg_step = (np.linalg.norm(p2 - p1) +
-                        np.linalg.norm(p3 - p2) +
-                        np.linalg.norm(p4 - p3)) / 3
-            step_size = avg_step * 0.35
-
-            p5 = np.clip(p4 + step_size * grad_norm, 0.0, 1.0)
+            avg_step = (np.linalg.norm(p2-p1)+np.linalg.norm(p3-p2)+np.linalg.norm(p4-p3))/3
+            p5 = np.clip(p4 + avg_step * 0.35 * grad_norm, 0.0, 1.0)
             result[key] = [round(float(x), 6) for x in p5]
-
         lines = []
         for key in result:
             portal_format = "-".join(f"{x:.6f}" for x in result[key])
@@ -297,10 +230,324 @@ def run_round5():
             print(f"  Portal format : {portal_format}")
             lines.append(f"{key}: {portal_format}")
         _save(lines, "queries_round5.txt")
+    except ImportError:
+        print("\n  PyTorch not found. Install with: pip install torch")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 6 — PyTorch surrogate + dimension-aware pooling
+# ═══════════════════════════════════════════════════════════════
+
+def run_round6():
+    print("\n" + "=" * 60)
+    print("ROUND 6 PROPOSED QUERIES (PyTorch + dimension-aware pooling)")
+    print("=" * 60)
+
+    try:
+        import torch
+        import torch.nn as nn
+
+        class PyTorchSurrogate(nn.Module):
+            def __init__(self, input_dim):
+                super().__init__()
+                self.net = nn.Sequential(
+                    nn.Linear(input_dim, 32), nn.ReLU(),
+                    nn.Linear(32, 16), nn.ReLU(),
+                    nn.Linear(16, 8), nn.ReLU(),
+                    nn.Linear(8, 1), nn.Sigmoid()
+                )
+            def forward(self, x):
+                return self.net(x)
+
+        all_rounds   = [round1, round2, round3, round4, round5]
+        label_values = [0.0, 0.25, 0.5, 0.75, 1.0]
+        result = {}
+
+        for key in round1:
+            points = [np.array(r[key], dtype=np.float32) for r in all_rounds]
+            dim    = len(points[0])
+            activity = np.zeros(dim)
+            for i in range(1, len(points)):
+                activity += np.abs(points[i] - points[i-1])
+            activity = activity / (activity.max() + 1e-8)
+            activity = 0.2 + 0.8 * activity
+            X_t = torch.tensor(np.array(points, dtype=np.float32))
+            y_t = torch.tensor(np.array([[v] for v in label_values], dtype=np.float32))
+            torch.manual_seed(42)
+            model = PyTorchSurrogate(input_dim=dim)
+            opt = torch.optim.Adam(model.parameters(), lr=0.01)
+            loss_fn = nn.MSELoss()
+            for _ in range(5000):
+                opt.zero_grad(); loss_fn(model(X_t), y_t).backward(); opt.step()
+            p5 = points[-1].copy()
+            for d in range(dim):
+                if p5[d] <= 0.01: p5[d] = 0.05
+                elif p5[d] >= 0.99: p5[d] = 0.95
+            x_query = torch.tensor(p5, dtype=torch.float32, requires_grad=True)
+            model(x_query.unsqueeze(0)).backward()
+            grad = x_query.grad.numpy()
+            grad_norm = (grad * activity) / (np.linalg.norm(grad * activity) + 1e-8)
+            recent_steps = [np.linalg.norm(points[i]-points[i-1]) for i in range(2, len(points))]
+            p6 = np.clip(p5 + np.mean(recent_steps) * 0.3 * grad_norm, 0.0, 1.0)
+            result[key] = [round(float(x), 6) for x in p6]
+
+        lines = []
+        for key in result:
+            portal_format = "-".join(f"{x:.6f}" for x in result[key])
+            print(f"\n{key}:")
+            print(f"  Round 5       : {round5[key]}")
+            print(f"  Round 6       : {result[key]}")
+            print(f"  Portal format : {portal_format}")
+            lines.append(f"{key}: {portal_format}")
+        _save(lines, "queries_round6.txt")
+    except ImportError:
+        print("\n  PyTorch not found. Install with: pip install torch")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 7 — PyTorch surrogate + hyperparameter grid search
+# ═══════════════════════════════════════════════════════════════
+
+def run_round7():
+    print("\n" + "=" * 60)
+    print("ROUND 7 PROPOSED QUERIES (PyTorch + hyperparameter grid search)")
+    print("=" * 60)
+
+    try:
+        import torch
+        import torch.nn as nn
+
+        def build_model(input_dim, hidden_size):
+            return nn.Sequential(
+                nn.Linear(input_dim, hidden_size), nn.ReLU(),
+                nn.Linear(hidden_size, 16), nn.ReLU(),
+                nn.Linear(16, 8), nn.ReLU(),
+                nn.Linear(8, 1), nn.Sigmoid()
+            )
+
+        def train_model(model, X_t, y_t, lr, epochs=2000):
+            opt = torch.optim.Adam(model.parameters(), lr=lr)
+            loss_fn = nn.MSELoss()
+            for _ in range(epochs):
+                opt.zero_grad(); loss_fn(model(X_t), y_t).backward(); opt.step()
+            return model
+
+        def loo_cv_loss(X_np, y_np, lr, hidden_size, input_dim):
+            n = len(X_np); total = 0.0
+            for i in range(n):
+                X_t = torch.tensor(np.delete(X_np, i, axis=0), dtype=torch.float32)
+                y_t = torch.tensor(np.delete(y_np, i, axis=0), dtype=torch.float32)
+                torch.manual_seed(42)
+                model = train_model(build_model(input_dim, hidden_size), X_t, y_t, lr)
+                with torch.no_grad():
+                    pred = model(torch.tensor(X_np[i:i+1], dtype=torch.float32))
+                    total += float((pred - torch.tensor(y_np[i:i+1], dtype=torch.float32))**2)
+            return total / n
+
+        lr_grid = [0.001, 0.005, 0.01, 0.05]
+        hidden_grid = [16, 32]
+        step_scale_grid = [0.2, 0.3, 0.4]
+        all_rounds = [round1, round2, round3, round4, round5, round6]
+        label_values = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        result = {}
+
+        for key in round1:
+            points = [np.array(r[key], dtype=np.float32) for r in all_rounds]
+            dim = len(points[0])
+            X_np = np.array(points, dtype=np.float32)
+            y_np = np.array([[v] for v in label_values], dtype=np.float32)
+            best_loss = float('inf'); best_lr = 0.01; best_hidden = 32
+            print(f"\n  {key}: running grid search...", end="", flush=True)
+            for lr in lr_grid:
+                for hs in hidden_grid:
+                    loss = loo_cv_loss(X_np, y_np, lr, hs, dim)
+                    if loss < best_loss:
+                        best_loss = loss; best_lr = lr; best_hidden = hs
+            print(f" best lr={best_lr}, hidden={best_hidden}, cv_loss={best_loss:.6f}")
+            X_t = torch.tensor(X_np); y_t = torch.tensor(y_np)
+            torch.manual_seed(42)
+            model = train_model(build_model(dim, best_hidden), X_t, y_t, best_lr, epochs=5000)
+            activity = np.zeros(dim)
+            for i in range(1, len(points)):
+                activity += np.abs(points[i] - points[i-1])
+            activity = 0.2 + 0.8 * activity / (activity.max() + 1e-8)
+            p6 = points[-1].copy()
+            for d in range(dim):
+                if p6[d] <= 0.01: p6[d] = 0.05
+                elif p6[d] >= 0.99: p6[d] = 0.95
+            x_query = torch.tensor(p6, dtype=torch.float32, requires_grad=True)
+            model(x_query.unsqueeze(0)).backward()
+            grad = x_query.grad.numpy()
+            grad_norm = (grad * activity) / (np.linalg.norm(grad * activity) + 1e-8)
+            recent_steps = [np.linalg.norm(points[i]-points[i-1]) for i in range(3, len(points))]
+            base_step = np.mean(recent_steps)
+            best_scale = 0.3
+            for scale in step_scale_grid:
+                if np.all(np.clip(p6 + base_step*scale*grad_norm, 0, 1) == p6 + base_step*scale*grad_norm):
+                    best_scale = scale; break
+            p7 = np.clip(p6 + base_step * best_scale * grad_norm, 0.0, 1.0)
+            result[key] = [round(float(x), 6) for x in p7]
+
+        lines = []
+        for key in result:
+            portal_format = "-".join(f"{x:.6f}" for x in result[key])
+            print(f"\n{key}:")
+            print(f"  Round 6       : {round6[key]}")
+            print(f"  Round 7       : {result[key]}")
+            print(f"  Portal format : {portal_format}")
+            lines.append(f"{key}: {portal_format}")
+        _save(lines, "queries_round7.txt")
+    except ImportError:
+        print("\n  PyTorch not found. Install with: pip install torch")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 8 — PyTorch surrogate + attention-weighted gradient
+#
+# Module focus: transformers, multi-head attention, tokenisation
+#
+# Key concept: in transformers, attention scores determine how
+# much each position attends to every other position. Here we
+# apply the same idea across the TIME dimension of our search:
+#
+#   - Treat each round as a "token" in a sequence
+#   - Compute attention scores between the current query point
+#     (Round 7) and all previous rounds using scaled dot-product
+#     attention: softmax(QK^T / sqrt(d)) * V
+#   - Rounds more similar to the current point get higher
+#     attention weights — they are more "relevant context"
+#   - Use attention weights to compute a weighted centroid of
+#     historical movements, forming an attention-guided
+#     direction for Round 8
+#   - Combine with the surrogate gradient for the final step
+#
+# This replaces the fixed activity mask from Rounds 6-7 with
+# a dynamic, query-dependent attention mechanism.
+# ═══════════════════════════════════════════════════════════════
+
+def run_round8():
+    print("\n" + "=" * 60)
+    print("ROUND 8 PROPOSED QUERIES (PyTorch + attention-weighted gradient)")
+    print("=" * 60)
+
+    try:
+        import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+
+        def build_model(input_dim, hidden_size=32):
+            return nn.Sequential(
+                nn.Linear(input_dim, hidden_size), nn.ReLU(),
+                nn.Linear(hidden_size, 16), nn.ReLU(),
+                nn.Linear(16, 8), nn.ReLU(),
+                nn.Linear(8, 1), nn.Sigmoid()
+            )
+
+        def train_model(model, X_t, y_t, lr=0.01, epochs=5000):
+            opt = torch.optim.Adam(model.parameters(), lr=lr)
+            loss_fn = nn.MSELoss()
+            for _ in range(epochs):
+                opt.zero_grad(); loss_fn(model(X_t), y_t).backward(); opt.step()
+            return model
+
+        def scaled_dot_product_attention(query, keys):
+            """
+            Transformer-style scaled dot-product attention.
+            query : (dim,)     — the current Round 7 point
+            keys  : (n, dim)   — all previous round points
+            Returns attention weights (n,) summing to 1.
+            Higher weight = more similar to current query = more relevant.
+
+            attention(Q, K) = softmax(QK^T / sqrt(d))
+            """
+            d = query.shape[0]
+            # Dot product between query and each key (round)
+            scores = keys @ query / np.sqrt(d)
+            # Softmax to get normalised attention weights
+            scores = scores - scores.max()  # numerical stability
+            weights = np.exp(scores) / np.sum(np.exp(scores))
+            return weights
+
+        all_rounds   = [round1, round2, round3, round4, round5, round6, round7]
+        label_values = [0.0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0]
+
+        result = {}
+
+        for key in round1:
+            points = [np.array(r[key], dtype=np.float32) for r in all_rounds]
+            dim    = len(points[0])
+
+            # ── Train surrogate on all 7 rounds ──
+            X_np = np.array(points, dtype=np.float32)
+            y_np = np.array([[v] for v in label_values], dtype=np.float32)
+            X_t  = torch.tensor(X_np)
+            y_t  = torch.tensor(y_np)
+
+            torch.manual_seed(42)
+            model = build_model(dim, hidden_size=32)
+            model = train_model(model, X_t, y_t, lr=0.01, epochs=5000)
+
+            # ── Compute surrogate gradient at Round 7 point ──
+            p7 = points[-1].copy()
+            for d in range(dim):
+                if p7[d] <= 0.01: p7[d] = 0.05
+                elif p7[d] >= 0.99: p7[d] = 0.95
+
+            x_query = torch.tensor(p7, dtype=torch.float32, requires_grad=True)
+            model(x_query.unsqueeze(0)).backward()
+            surrogate_grad = x_query.grad.numpy()
+
+            # ── Compute attention weights over previous rounds ──
+            # Query = current point (Round 7)
+            # Keys  = all previous round points
+            # Rounds more similar to Round 7 get higher attention
+            query = p7                          # (dim,)
+            keys  = np.array(points[:-1])       # (n_prev, dim)
+            attn_weights = scaled_dot_product_attention(query, keys)
+
+            # ── Attention-weighted movement direction ──
+            # For each previous round, compute the movement vector
+            # to the next round. Weight each by attention score.
+            # This asks: "what movements from similar past states
+            # were most useful?" — the transformer's key insight.
+            movements = []
+            for i in range(1, len(points) - 1):
+                move = points[i] - points[i-1]
+                movements.append(move)
+            movements = np.array(movements)             # (n_prev-1, dim)
+            attn_weights_moves = attn_weights[1:]       # align with movements
+            attn_weights_moves = attn_weights_moves / (attn_weights_moves.sum() + 1e-8)
+            attention_direction = attn_weights_moves @ movements  # (dim,)
+
+            # ── Combine surrogate gradient + attention direction ──
+            # 60% surrogate gradient (exploitation)
+            # 40% attention-weighted historical direction (context)
+            surrogate_norm  = surrogate_grad / (np.linalg.norm(surrogate_grad) + 1e-8)
+            attention_norm  = attention_direction / (np.linalg.norm(attention_direction) + 1e-8)
+            combined        = 0.6 * surrogate_norm + 0.4 * attention_norm
+            combined_norm   = combined / (np.linalg.norm(combined) + 1e-8)
+
+            # ── Step size: mean of last 3 round movements * 0.25 ──
+            recent_steps = [np.linalg.norm(points[i] - points[i-1])
+                            for i in range(4, len(points))]
+            step_size = np.mean(recent_steps) * 0.25
+
+            p8 = np.clip(p7 + step_size * combined_norm, 0.0, 1.0)
+            result[key] = [round(float(x), 6) for x in p8]
+
+        lines = []
+        for key in result:
+            portal_format = "-".join(f"{x:.6f}" for x in result[key])
+            print(f"\n{key}:")
+            print(f"  Round 7       : {round7[key]}")
+            print(f"  Round 8       : {result[key]}")
+            print(f"  Portal format : {portal_format}")
+            lines.append(f"{key}: {portal_format}")
+        _save(lines, "queries_round8.txt")
 
     except ImportError:
-        print("\n  PyTorch not found. Install it with: pip install torch")
-        print("  Then re-run: python main.py --round 5")
+        print("\n  PyTorch not found. Install with: pip install torch")
+        print("  Then re-run: python main.py --round 8")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -326,21 +573,19 @@ def _save(lines, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BBO Capstone - Query Generator")
     parser.add_argument(
-        "--round", type=int, choices=[2, 3, 4, 5],
-        help="Which round to run (2, 3, 4 or 5). Omit to run all."
+        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8],
+        help="Which round to run (2-8). Omit to run all."
     )
     args = parser.parse_args()
 
-    if args.round == 2:
-        run_round2()
-    elif args.round == 3:
-        run_round3()
-    elif args.round == 4:
-        run_round4()
-    elif args.round == 5:
-        run_round5()
+    if args.round == 2:   run_round2()
+    elif args.round == 3: run_round3()
+    elif args.round == 4: run_round4()
+    elif args.round == 5: run_round5()
+    elif args.round == 6: run_round6()
+    elif args.round == 7: run_round7()
+    elif args.round == 8: run_round8()
     else:
-        run_round2()
-        run_round3()
-        run_round4()
-        run_round5()
+        run_round2(); run_round3(); run_round4()
+        run_round5(); run_round6(); run_round7()
+        run_round8()
