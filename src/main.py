@@ -1,5 +1,5 @@
 # src/main.py
-# BBO Capstone - Full Query Strategy (Rounds 1-8)
+# BBO Capstone - Full Query Strategy (Rounds 1-9)
 # Imperial College / Emeritus PCMLAI Capstone
 #
 # USAGE:
@@ -10,6 +10,7 @@
 #   python main.py --round 6   → generate Round 6 (PyTorch + dimension-aware pooling)
 #   python main.py --round 7   → generate Round 7 (PyTorch + hyperparameter grid search)
 #   python main.py --round 8   → generate Round 8 (PyTorch + attention-weighted gradient)
+#   python main.py --round 9   → generate Round 9 (real scores + score-guided strategy)
 #   python main.py             → runs all rounds in sequence
 #
 # REQUIREMENTS:
@@ -18,7 +19,7 @@
 import argparse
 import numpy as np
 import os
-from data_loader import round1, round2, round3, round4, round5, round6, round7
+from data_loader import round1, round2, round3, round4, round5, round6, round7, round8
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 
@@ -403,26 +404,6 @@ def run_round7():
 
 # ═══════════════════════════════════════════════════════════════
 # ROUND 8 — PyTorch surrogate + attention-weighted gradient
-#
-# Module focus: transformers, multi-head attention, tokenisation
-#
-# Key concept: in transformers, attention scores determine how
-# much each position attends to every other position. Here we
-# apply the same idea across the TIME dimension of our search:
-#
-#   - Treat each round as a "token" in a sequence
-#   - Compute attention scores between the current query point
-#     (Round 7) and all previous rounds using scaled dot-product
-#     attention: softmax(QK^T / sqrt(d)) * V
-#   - Rounds more similar to the current point get higher
-#     attention weights — they are more "relevant context"
-#   - Use attention weights to compute a weighted centroid of
-#     historical movements, forming an attention-guided
-#     direction for Round 8
-#   - Combine with the surrogate gradient for the final step
-#
-# This replaces the fixed activity mask from Rounds 6-7 with
-# a dynamic, query-dependent attention mechanism.
 # ═══════════════════════════════════════════════════════════════
 
 def run_round8():
@@ -433,7 +414,6 @@ def run_round8():
     try:
         import torch
         import torch.nn as nn
-        import torch.nn.functional as F
 
         def build_model(input_dim, hidden_size=32):
             return nn.Sequential(
@@ -451,87 +431,43 @@ def run_round8():
             return model
 
         def scaled_dot_product_attention(query, keys):
-            """
-            Transformer-style scaled dot-product attention.
-            query : (dim,)     — the current Round 7 point
-            keys  : (n, dim)   — all previous round points
-            Returns attention weights (n,) summing to 1.
-            Higher weight = more similar to current query = more relevant.
-
-            attention(Q, K) = softmax(QK^T / sqrt(d))
-            """
             d = query.shape[0]
-            # Dot product between query and each key (round)
             scores = keys @ query / np.sqrt(d)
-            # Softmax to get normalised attention weights
-            scores = scores - scores.max()  # numerical stability
+            scores = scores - scores.max()
             weights = np.exp(scores) / np.sum(np.exp(scores))
             return weights
 
         all_rounds   = [round1, round2, round3, round4, round5, round6, round7]
         label_values = [0.0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0]
-
         result = {}
 
         for key in round1:
             points = [np.array(r[key], dtype=np.float32) for r in all_rounds]
             dim    = len(points[0])
-
-            # ── Train surrogate on all 7 rounds ──
-            X_np = np.array(points, dtype=np.float32)
-            y_np = np.array([[v] for v in label_values], dtype=np.float32)
-            X_t  = torch.tensor(X_np)
-            y_t  = torch.tensor(y_np)
-
+            X_t = torch.tensor(np.array(points, dtype=np.float32))
+            y_t = torch.tensor(np.array([[v] for v in label_values], dtype=np.float32))
             torch.manual_seed(42)
-            model = build_model(dim, hidden_size=32)
-            model = train_model(model, X_t, y_t, lr=0.01, epochs=5000)
-
-            # ── Compute surrogate gradient at Round 7 point ──
+            model = build_model(dim)
+            model = train_model(model, X_t, y_t)
             p7 = points[-1].copy()
             for d in range(dim):
                 if p7[d] <= 0.01: p7[d] = 0.05
                 elif p7[d] >= 0.99: p7[d] = 0.95
-
             x_query = torch.tensor(p7, dtype=torch.float32, requires_grad=True)
             model(x_query.unsqueeze(0)).backward()
             surrogate_grad = x_query.grad.numpy()
-
-            # ── Compute attention weights over previous rounds ──
-            # Query = current point (Round 7)
-            # Keys  = all previous round points
-            # Rounds more similar to Round 7 get higher attention
-            query = p7                          # (dim,)
-            keys  = np.array(points[:-1])       # (n_prev, dim)
+            query = p7
+            keys  = np.array(points[:-1])
             attn_weights = scaled_dot_product_attention(query, keys)
-
-            # ── Attention-weighted movement direction ──
-            # For each previous round, compute the movement vector
-            # to the next round. Weight each by attention score.
-            # This asks: "what movements from similar past states
-            # were most useful?" — the transformer's key insight.
-            movements = []
-            for i in range(1, len(points) - 1):
-                move = points[i] - points[i-1]
-                movements.append(move)
-            movements = np.array(movements)             # (n_prev-1, dim)
-            attn_weights_moves = attn_weights[1:]       # align with movements
-            attn_weights_moves = attn_weights_moves / (attn_weights_moves.sum() + 1e-8)
-            attention_direction = attn_weights_moves @ movements  # (dim,)
-
-            # ── Combine surrogate gradient + attention direction ──
-            # 60% surrogate gradient (exploitation)
-            # 40% attention-weighted historical direction (context)
-            surrogate_norm  = surrogate_grad / (np.linalg.norm(surrogate_grad) + 1e-8)
-            attention_norm  = attention_direction / (np.linalg.norm(attention_direction) + 1e-8)
-            combined        = 0.6 * surrogate_norm + 0.4 * attention_norm
-            combined_norm   = combined / (np.linalg.norm(combined) + 1e-8)
-
-            # ── Step size: mean of last 3 round movements * 0.25 ──
-            recent_steps = [np.linalg.norm(points[i] - points[i-1])
-                            for i in range(4, len(points))]
+            movements = np.array([points[i] - points[i-1] for i in range(1, len(points)-1)])
+            attn_w = attn_weights[1:] / (attn_weights[1:].sum() + 1e-8)
+            attention_direction = attn_w @ movements
+            surrogate_norm = surrogate_grad / (np.linalg.norm(surrogate_grad) + 1e-8)
+            attention_norm = attention_direction / (np.linalg.norm(attention_direction) + 1e-8)
+            combined = 0.6 * surrogate_norm + 0.4 * attention_norm
+            combined_norm = combined / (np.linalg.norm(combined) + 1e-8)
+            recent_steps = [np.linalg.norm(points[i]-points[i-1]) for i in range(4, len(points))]
             step_size = np.mean(recent_steps) * 0.25
-
             p8 = np.clip(p7 + step_size * combined_norm, 0.0, 1.0)
             result[key] = [round(float(x), 6) for x in p8]
 
@@ -544,10 +480,133 @@ def run_round8():
             print(f"  Portal format : {portal_format}")
             lines.append(f"{key}: {portal_format}")
         _save(lines, "queries_round8.txt")
-
     except ImportError:
         print("\n  PyTorch not found. Install with: pip install torch")
-        print("  Then re-run: python main.py --round 8")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 9 — Real score-guided strategy
+#
+# GAME CHANGER: we now have real oracle scores for all rounds
+# 3-8. This completely replaces synthetic labelling.
+#
+# Full score history per function:
+#   W3      W4       W5       W6       W7       W8
+# f1: ~0     ~0       ~0       ~0       ~0       ~0    → flat, reset
+# f2: 0.725  0.435    0.541    0.531    0.582    0.537 → noisy, near best at W3
+# f3: -0.127 -0.159   -0.179   -0.170   -0.162   -0.159 → wrong dir, reset
+# f4: -4.378 -4.378   -6.056   -6.254   -6.379   -6.494 → getting worse, hard reset
+# f5: 445.9  1320.3   1623.0   658.4    542.7    520.5 → PEAKED W5, move back there
+# f6: -0.552 -0.611   -0.613   -0.576   -0.581   -0.580 → consistently negative
+# f7: 1.187  1.188    1.186    1.185    1.185    1.184 → very stable, tiny decline
+# f8: 8.070  8.072    8.071    8.071    8.060    8.059 → very stable, tiny decline
+#
+# Strategy:
+#   f1 → reset to [0.5, 0.5] (completely flat everywhere we've tried)
+#   f2 → move back toward Week 3 coordinates (best score was there)
+#   f3 → reset toward centre (consistently negative)
+#   f4 → hard reset toward centre (getting dramatically worse)
+#   f5 → move back toward Week 5 coordinates (best score was 1623 there)
+#   f6 → reset toward centre (consistently negative)
+#   f7 → tiny exploitation step (stable, very slightly declining)
+#   f8 → tiny exploitation step (stable, very slightly declining)
+# ═══════════════════════════════════════════════════════════════
+
+def run_round9():
+    print("\n" + "=" * 60)
+    print("ROUND 9 PROPOSED QUERIES (Real score-guided strategy)")
+    print("=" * 60)
+
+    # All real scores indexed by week (3-8) and function
+    all_scores = {
+        "f1": [6.36e-25, 2.33e-25, 1.19e-26, 2.64e-27, 1.42e-27, 8.76e-28],
+        "f2": [0.7247,   0.4346,   0.5414,   0.5306,   0.5819,   0.5375],
+        "f3": [-0.1268,  -0.1590,  -0.1790,  -0.1701,  -0.1620,  -0.1587],
+        "f4": [-4.378,   -4.378,   -6.056,   -6.254,   -6.379,   -6.494],
+        "f5": [445.89,   1320.26,  1623.03,  658.43,   542.69,   520.50],
+        "f6": [-0.5522,  -0.6107,  -0.6126,  -0.5762,  -0.5812,  -0.5800],
+        "f7": [1.1865,   1.1880,   1.1862,   1.1852,   1.1848,   1.1843],
+        "f8": [8.0703,   8.0724,   8.0712,   8.0712,   8.0598,   8.0593],
+    }
+
+    # Rounds corresponding to weeks 3-8
+    scored_rounds = [round3, round4, round5, round6, round7, round8]
+
+    result = {}
+
+    for key in round1:
+        scores = all_scores[key]
+        best_idx = int(np.argmax(scores))
+        best_score = scores[best_idx]
+        current_point = np.array(round8[key], dtype=np.float32)
+        best_point = np.array(scored_rounds[best_idx][key], dtype=np.float32)
+        dim = len(current_point)
+
+        print(f"\n  {key}: best_score={best_score:.4f} at week {best_idx+3}, "
+              f"current={scores[-1]:.4f}")
+
+        if key == "f1":
+            # Completely flat everywhere — reset to centre
+            p9 = np.full(dim, 0.5, dtype=np.float32)
+            print(f"    → RESET to centre")
+
+        elif key == "f2":
+            # Best was Week 3 (0.7247). Move back toward that point
+            direction = best_point - current_point
+            dir_norm = direction / (np.linalg.norm(direction) + 1e-8)
+            step_size = np.linalg.norm(direction) * 0.6
+            p9 = np.clip(current_point + step_size * dir_norm, 0.0, 1.0)
+            print(f"    → RETURN toward best point (W{best_idx+3})")
+
+        elif key == "f3":
+            # Consistently negative — reset toward centre
+            centre = np.full(dim, 0.5, dtype=np.float32)
+            direction = centre - current_point
+            p9 = np.clip(current_point + direction * 0.7, 0.0, 1.0)
+            print(f"    → RESET toward centre")
+
+        elif key == "f4":
+            # Getting dramatically worse — hard reset to centre
+            p9 = np.full(dim, 0.5, dtype=np.float32)
+            print(f"    → HARD RESET to centre")
+
+        elif key == "f5":
+            # Peaked at Week 5 (1623) — move back toward those coordinates
+            direction = best_point - current_point
+            dir_norm = direction / (np.linalg.norm(direction) + 1e-8)
+            step_size = np.linalg.norm(direction) * 0.7
+            p9 = np.clip(current_point + step_size * dir_norm, 0.0, 1.0)
+            print(f"    → RETURN toward best point (W{best_idx+3}, score={best_score:.1f})")
+
+        elif key == "f6":
+            # Consistently negative — reset toward centre
+            centre = np.full(dim, 0.5, dtype=np.float32)
+            direction = centre - current_point
+            p9 = np.clip(current_point + direction * 0.7, 0.0, 1.0)
+            print(f"    → RESET toward centre")
+
+        elif key in ["f7", "f8"]:
+            # Stable and positive — tiny exploitation step in same direction
+            last_move = np.array(round8[key]) - np.array(round7[key])
+            move_norm = last_move / (np.linalg.norm(last_move) + 1e-8)
+            step_size = np.linalg.norm(last_move) * 0.5
+            p9 = np.clip(current_point + step_size * move_norm, 0.0, 1.0)
+            print(f"    → EXPLOIT: continue small step")
+
+        else:
+            p9 = current_point
+
+        result[key] = [round(float(x), 6) for x in p9]
+
+    lines = []
+    for key in result:
+        portal_format = "-".join(f"{x:.6f}" for x in result[key])
+        print(f"\n{key}:")
+        print(f"  Round 8       : {round8[key]}")
+        print(f"  Round 9       : {result[key]}")
+        print(f"  Portal format : {portal_format}")
+        lines.append(f"{key}: {portal_format}")
+    _save(lines, "queries_round9.txt")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -573,8 +632,8 @@ def _save(lines, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BBO Capstone - Query Generator")
     parser.add_argument(
-        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8],
-        help="Which round to run (2-8). Omit to run all."
+        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9],
+        help="Which round to run (2-9). Omit to run all."
     )
     args = parser.parse_args()
 
@@ -585,7 +644,8 @@ if __name__ == "__main__":
     elif args.round == 6: run_round6()
     elif args.round == 7: run_round7()
     elif args.round == 8: run_round8()
+    elif args.round == 9: run_round9()
     else:
         run_round2(); run_round3(); run_round4()
         run_round5(); run_round6(); run_round7()
-        run_round8()
+        run_round8(); run_round9()
