@@ -1,5 +1,5 @@
 # src/main.py
-# BBO Capstone - Full Query Strategy (Rounds 1-9)
+# BBO Capstone - Full Query Strategy (Rounds 1-10)
 # Imperial College / Emeritus PCMLAI Capstone
 #
 # USAGE:
@@ -11,6 +11,7 @@
 #   python main.py --round 7   → generate Round 7 (PyTorch + hyperparameter grid search)
 #   python main.py --round 8   → generate Round 8 (PyTorch + attention-weighted gradient)
 #   python main.py --round 9   → generate Round 9 (real scores + score-guided strategy)
+#   python main.py --round 10  → generate Round 10 (real-score surrogate + interpretable)
 #   python main.py             → runs all rounds in sequence
 #
 # REQUIREMENTS:
@@ -19,7 +20,7 @@
 import argparse
 import numpy as np
 import os
-from data_loader import round1, round2, round3, round4, round5, round6, round7, round8
+from data_loader import round1, round2, round3, round4, round5, round6, round7, round8, round9
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 
@@ -609,6 +610,218 @@ def run_round9():
     _save(lines, "queries_round9.txt")
 
 
+# ROUND 10 function — paste this into main.py
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 10 — Real-score surrogate + fully interpretable decisions
+#
+# Module focus: transparency and interpretability
+#
+# This is the most principled round yet. We now have real oracle
+# scores for 7 consecutive rounds (W3-W9). This enables:
+#
+#   1. REAL LABELS: surrogate trained on actual oracle outputs
+#      (normalised to [0,1]) instead of synthetic progressions
+#
+#   2. INTERPRETABLE DECISIONS: for each function, the code
+#      prints the exact reasoning — which historical point was
+#      best, what direction is being taken, and why
+#
+#   3. SCORE-BASED ROUTING: per-function strategy chosen
+#      explicitly based on score trend analysis:
+#      - improving  → continue in same direction
+#      - declining  → return toward historical best
+#      - recovering → keep recovering (reset worked last round)
+#      - negative   → try new region or reverse
+#
+# Per-function score analysis (W3→W9):
+#   f1: ~0 everywhere → explore new region from centre
+#   f2: 0.72→0.57 noisy, W9=0.573 improving → small step
+#   f3: negative, W9=-0.058 (best ever) → keep recovering
+#   f4: -4.38→-3.99 improving from reset → continue toward centre
+#   f5: 446→1623→520→1189, W9=1189 → keep going this direction
+#   f6: W9=-0.764 worse after reset → return to pre-reset region
+#   f7: stable 1.184-1.188 → tiny exploitation step
+#   f8: stable 8.059-8.072 → tiny exploitation step
+# ═══════════════════════════════════════════════════════════════
+
+def run_round10():
+    print("\n" + "=" * 60)
+    print("ROUND 10 PROPOSED QUERIES (Real-score surrogate + interpretable)")
+    print("=" * 60)
+
+    try:
+        import torch
+        import torch.nn as nn
+
+        # ── Full real score history W3-W9 ──
+        all_scores = {
+            "f1": [6.36e-25, 2.33e-25, 1.19e-26, 2.64e-27, 1.42e-27, 8.76e-28, 2.68e-9],
+            "f2": [0.7247,   0.4346,   0.5414,   0.5306,   0.5819,   0.5375,   0.5730],
+            "f3": [-0.1268,  -0.1590,  -0.1790,  -0.1701,  -0.1620,  -0.1587,  -0.0585],
+            "f4": [-4.378,   -4.378,   -6.056,   -6.254,   -6.379,   -6.494,   -3.986],
+            "f5": [445.89,   1320.26,  1623.03,  658.43,   542.69,   520.50,   1189.00],
+            "f6": [-0.5522,  -0.6107,  -0.6126,  -0.5762,  -0.5812,  -0.5800,  -0.7636],
+            "f7": [1.1865,   1.1880,   1.1862,   1.1852,   1.1848,   1.1843,   1.1841],
+            "f8": [8.0703,   8.0724,   8.0712,   8.0712,   8.0598,   8.0593,   8.0590],
+        }
+
+        # All rounds W3-W9
+        all_rounds = [round3, round4, round5, round6, round7, round8, round9]
+
+        def build_model(input_dim):
+            return nn.Sequential(
+                nn.Linear(input_dim, 32), nn.ReLU(),
+                nn.Linear(32, 16), nn.ReLU(),
+                nn.Linear(16, 8), nn.ReLU(),
+                nn.Linear(8, 1), nn.Sigmoid()
+            )
+
+        def train_model(model, X_t, y_t, lr=0.01, epochs=5000):
+            opt = torch.optim.Adam(model.parameters(), lr=lr)
+            loss_fn = nn.MSELoss()
+            for _ in range(epochs):
+                opt.zero_grad()
+                loss_fn(model(X_t), y_t).backward()
+                opt.step()
+            return model
+
+        def normalise_scores(scores):
+            """Normalise real scores to [0,1] for surrogate training."""
+            s = np.array(scores, dtype=np.float32)
+            s_min, s_max = s.min(), s.max()
+            if s_max - s_min < 1e-8:
+                return np.full_like(s, 0.5)
+            return (s - s_min) / (s_max - s_min)
+
+        result = {}
+
+        for key in round1:
+            scores  = all_scores[key]
+            points  = [np.array(r[key], dtype=np.float32) for r in all_rounds]
+            dim     = len(points[0])
+            current = points[-1].copy()  # Round 9 point
+
+            best_idx   = int(np.argmax(scores))
+            best_score = scores[best_idx]
+            best_point = points[best_idx]
+            prev_score = scores[-2]   # W8
+            curr_score = scores[-1]   # W9
+            trend      = curr_score - prev_score
+
+            # Boundary correction
+            for d in range(dim):
+                if current[d] <= 0.01: current[d] = 0.05
+                elif current[d] >= 0.99: current[d] = 0.95
+
+            print(f"\n{'─'*50}")
+            print(f"  {key}: W9={curr_score:.4f} | best=W{best_idx+3}"
+                  f"({best_score:.4f}) | trend={trend:+.4f}")
+
+            # ── Train surrogate with REAL normalised scores ──
+            norm_labels = normalise_scores(scores)
+            X_np = np.array(points, dtype=np.float32)
+            y_np = norm_labels.reshape(-1, 1)
+            X_t  = torch.tensor(X_np)
+            y_t  = torch.tensor(y_np)
+            torch.manual_seed(42)
+            model = build_model(dim)
+            model = train_model(model, X_t, y_t)
+
+            # ── Get surrogate gradient at current point ──
+            x_q = torch.tensor(current, dtype=torch.float32, requires_grad=True)
+            model(x_q.unsqueeze(0)).backward()
+            grad = x_q.grad.numpy()
+            grad_norm = grad / (np.linalg.norm(grad) + 1e-8)
+
+            # ── Per-function interpretable strategy ──
+            if key == "f1":
+                # Score ~0 everywhere. W9 reset to centre showed
+                # tiny improvement (2.7e-9 vs 8.7e-28). Try a
+                # surrogate-guided step from centre.
+                step_size = 0.08
+                p10 = np.clip(current + step_size * grad_norm, 0.0, 1.0)
+                reason = "surrogate gradient from centre (score still ~0, exploring)"
+
+            elif key == "f2":
+                # W9=0.573, improving from W8=0.537.
+                # Continue in same direction as W8→W9 move.
+                last_move = points[-1] - points[-2]
+                move_norm = last_move / (np.linalg.norm(last_move) + 1e-8)
+                # Blend with surrogate gradient 50/50
+                combined = 0.5 * grad_norm + 0.5 * move_norm
+                combined /= (np.linalg.norm(combined) + 1e-8)
+                step_size = np.linalg.norm(last_move) * 0.8
+                p10 = np.clip(current + step_size * combined, 0.0, 1.0)
+                reason = "continue W8→W9 direction + surrogate gradient (improving)"
+
+            elif key == "f3":
+                # W9=-0.058, best score ever for f3.
+                # Reset to centre worked. Continue surrogate gradient.
+                step_size = 0.06
+                p10 = np.clip(current + step_size * grad_norm, 0.0, 1.0)
+                reason = "surrogate gradient (W9 best ever for f3, keep recovering)"
+
+            elif key == "f4":
+                # W9=-3.986, improving from W8=-6.494.
+                # Hard reset to centre worked. Surrogate gradient from here.
+                step_size = 0.08
+                p10 = np.clip(current + step_size * grad_norm, 0.0, 1.0)
+                reason = "surrogate gradient from centre (reset worked, continuing recovery)"
+
+            elif key == "f5":
+                # W9=1189, moving in right direction toward W5 peak (1623).
+                # Continue in same direction — we are recovering well.
+                last_move = points[-1] - points[-2]
+                move_norm = last_move / (np.linalg.norm(last_move) + 1e-8)
+                # Also blend with direction toward all-time best (W5)
+                to_best = best_point - current
+                to_best_norm = to_best / (np.linalg.norm(to_best) + 1e-8)
+                combined = 0.5 * move_norm + 0.5 * to_best_norm
+                combined /= (np.linalg.norm(combined) + 1e-8)
+                step_size = np.linalg.norm(last_move) * 1.2
+                p10 = np.clip(current + step_size * combined, 0.0, 1.0)
+                reason = "continue toward W5 best (1623) — recovery on track"
+
+            elif key == "f6":
+                # W9=-0.764, reset made it worse.
+                # Return toward pre-reset best region (W7=-0.581).
+                target = np.array(round7[key], dtype=np.float32)
+                direction = target - current
+                dir_norm = direction / (np.linalg.norm(direction) + 1e-8)
+                step_size = np.linalg.norm(direction) * 0.6
+                p10 = np.clip(current + step_size * dir_norm, 0.0, 1.0)
+                reason = "return toward W7 region (reset hurt f6, recovering)"
+
+            elif key in ["f7", "f8"]:
+                # Both stable and positive. Tiny surrogate gradient step.
+                recent = [np.linalg.norm(points[i]-points[i-1])
+                          for i in range(4, len(points))]
+                step_size = np.mean(recent) * 0.4
+                p10 = np.clip(current + step_size * grad_norm, 0.0, 1.0)
+                reason = "tiny surrogate gradient (stable positive, careful exploitation)"
+
+            else:
+                p10 = current
+
+            result[key] = [round(float(x), 6) for x in p10]
+            print(f"  Reason: {reason}")
+
+        lines = []
+        for key in result:
+            portal_format = "-".join(f"{x:.6f}" for x in result[key])
+            print(f"\n{key}:")
+            print(f"  Round 9       : {round9[key]}")
+            print(f"  Round 10      : {result[key]}")
+            print(f"  Portal format : {portal_format}")
+            lines.append(f"{key}: {portal_format}")
+        _save(lines, "queries_round10.txt")
+
+    except ImportError:
+        print("\n  PyTorch not found. Install with: pip install torch")
+        print("  Then re-run: python main.py --round 10")
+
+
 # ═══════════════════════════════════════════════════════════════
 # HELPER — Save results to ../results/
 # ═══════════════════════════════════════════════════════════════
@@ -632,8 +845,8 @@ def _save(lines, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BBO Capstone - Query Generator")
     parser.add_argument(
-        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9],
-        help="Which round to run (2-9). Omit to run all."
+        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10],
+        help="Which round to run (2-10). Omit to run all."
     )
     args = parser.parse_args()
 
@@ -645,7 +858,8 @@ if __name__ == "__main__":
     elif args.round == 7: run_round7()
     elif args.round == 8: run_round8()
     elif args.round == 9: run_round9()
+    elif args.round == 10: run_round10()
     else:
         run_round2(); run_round3(); run_round4()
         run_round5(); run_round6(); run_round7()
-        run_round8(); run_round9()
+        run_round8(); run_round9(); run_round10()
