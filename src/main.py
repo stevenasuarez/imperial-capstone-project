@@ -1,5 +1,5 @@
 # src/main.py
-# BBO Capstone - Full Query Strategy (Rounds 1-10)
+# BBO Capstone - Full Query Strategy (Rounds 1-12)
 # Imperial College / Emeritus PCMLAI Capstone
 #
 # USAGE:
@@ -12,6 +12,8 @@
 #   python main.py --round 8   → generate Round 8 (PyTorch + attention-weighted gradient)
 #   python main.py --round 9   → generate Round 9 (real scores + score-guided strategy)
 #   python main.py --round 10  → generate Round 10 (real-score surrogate + interpretable)
+#   python main.py --round 11  → generate Round 11 (clustering-based strategy)
+#   python main.py --round 12  → generate Round 12 (PCA-guided search)
 #   python main.py             → runs all rounds in sequence
 #
 # REQUIREMENTS:
@@ -20,7 +22,7 @@
 import argparse
 import numpy as np
 import os
-from data_loader import round1, round2, round3, round4, round5, round6, round7, round8, round9
+from data_loader import round1, round2, round3, round4, round5, round6, round7, round8, round9, round10, round11
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 
@@ -822,6 +824,415 @@ def run_round10():
         print("  Then re-run: python main.py --round 10")
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 11 — Clustering-based strategy (K-means on score history)
+#
+# Module focus: clustering, distance metrics, centroids
+#
+# Strategy:
+#   For each function we now have 8 real scored points (W3-W10).
+#   We apply score-weighted K-means clustering to identify
+#   which regions of input space produced the best outputs.
+#
+#   - Split points into "high" and "low" score clusters
+#   - Compute the centroid of the high-score cluster
+#   - Query toward that centroid, blended with the best
+#     individual point to avoid overshooting
+#
+#   For functions with clear directional trends (f5, f2, f3, f6)
+#   we also incorporate the gradient from the scored surrogate.
+#
+#   Per-function cluster analysis:
+#   f1: all scores ~0, no meaningful cluster — explore randomly
+#   f2: two clusters — high (~0.72, W3) and low (~0.43, W4)
+#   f3: improving cluster around centre region (W9, W10 best)
+#   f4: improving cluster around centre (W9, W10 best)
+#   f5: high-score cluster near [0.0-0.2, ~1.0, ~1.0, 0.2-0.4]
+#   f6: best cluster near pre-reset W7 region
+#   f7: tight cluster around current coords (very stable)
+#   f8: tight cluster around current coords (very stable)
+# ═══════════════════════════════════════════════════════════════
+
+def run_round11():
+    print("\n" + "=" * 60)
+    print("ROUND 11 PROPOSED QUERIES (Clustering-based strategy)")
+    print("=" * 60)
+
+    # Full real score history W3-W10
+    all_scores = {
+        "f1": [6.36e-25, 2.33e-25, 1.19e-26, 2.64e-27, 1.42e-27, 8.76e-28, 2.68e-9,  3.22e-14],
+        "f2": [0.7247,   0.4346,   0.5414,   0.5306,   0.5819,   0.5375,   0.5730,   0.6305],
+        "f3": [-0.1268,  -0.1590,  -0.1790,  -0.1701,  -0.1620,  -0.1587,  -0.0585,  -0.0472],
+        "f4": [-4.378,   -4.378,   -6.056,   -6.254,   -6.379,   -6.494,   -3.986,   -4.192],
+        "f5": [445.89,   1320.26,  1623.03,  658.43,   542.69,   520.50,   1189.00,  1668.88],
+        "f6": [-0.5522,  -0.6107,  -0.6126,  -0.5762,  -0.5812,  -0.5800,  -0.7636,  -0.5182],
+        "f7": [1.1865,   1.1880,   1.1862,   1.1852,   1.1848,   1.1843,   1.1841,   1.1841],
+        "f8": [8.0703,   8.0724,   8.0712,   8.0712,   8.0598,   8.0593,   8.0590,   8.0590],
+    }
+
+    # Rounds W3-W10
+    scored_rounds = [round3, round4, round5, round6, round7, round8, round9, round10]
+
+    def score_weighted_centroid(points, scores):
+        """
+        Compute score-weighted centroid of a set of points.
+        Points with higher scores contribute more to the centroid.
+        Negative scores get zero weight (they pull away from good regions).
+        This is the clustering equivalent of a weighted mean — the
+        centroid of the 'high performance cluster'.
+        """
+        pts = np.array(points, dtype=np.float32)
+        s = np.array(scores, dtype=np.float32)
+        # Shift scores so minimum = 0 (all weights non-negative)
+        s_shifted = s - s.min()
+        if s_shifted.sum() < 1e-8:
+            return pts.mean(axis=0)  # uniform if all scores equal
+        weights = s_shifted / s_shifted.sum()
+        return (weights[:, None] * pts).sum(axis=0)
+
+    def high_score_cluster_centroid(points, scores, top_k=3):
+        """
+        Take the top-k scoring points and compute their centroid.
+        This identifies the 'best cluster' in the search history
+        and returns its centre — the most promising region found so far.
+        """
+        pts = np.array(points, dtype=np.float32)
+        s   = np.array(scores)
+        top_idx = np.argsort(s)[-top_k:]
+        return pts[top_idx].mean(axis=0)
+
+    result = {}
+
+    for key in round1:
+        scores  = all_scores[key]
+        points  = [np.array(r[key], dtype=np.float32) for r in scored_rounds]
+        dim     = len(points[0])
+        current = np.array(round10[key], dtype=np.float32)
+
+        best_idx   = int(np.argmax(scores))
+        best_score = scores[best_idx]
+        best_point = points[best_idx]
+        curr_score = scores[-1]
+
+        # Boundary correction on current
+        for d in range(dim):
+            if current[d] <= 0.01: current[d] = 0.05
+            elif current[d] >= 0.99: current[d] = 0.95
+
+        # Score-weighted centroid (full history)
+        sw_centroid = score_weighted_centroid(points, scores)
+
+        # High-score cluster centroid (top 3 points)
+        hs_centroid = high_score_cluster_centroid(points, scores, top_k=3)
+
+        print(f"\n{'─'*50}")
+        print(f"  {key}: W10={curr_score:.4f} | best=W{best_idx+3}({best_score:.4f})")
+        print(f"  Score-weighted centroid : {[round(float(x),4) for x in sw_centroid]}")
+        print(f"  High-score centroid     : {[round(float(x),4) for x in hs_centroid]}")
+
+        if key == "f1":
+            # All scores ~0 — no meaningful cluster.
+            # Try a different unexplored region: move toward
+            # the corner opposite to current position.
+            opposite = np.clip(1.0 - current, 0.05, 0.95)
+            p11 = opposite
+            cluster = "no cluster (all ~0) — explore opposite corner"
+
+        elif key == "f2":
+            # Best score at W3 (0.7247), W10=0.631 improving.
+            # High-score cluster centroid points toward W3 region.
+            # Step 70% toward high-score centroid from current.
+            direction = hs_centroid - current
+            p11 = np.clip(current + 0.7 * direction, 0.0, 1.0)
+            cluster = f"high-score cluster centroid (top-3 avg, best=W{best_idx+3})"
+
+        elif key == "f3":
+            # W10=-0.047 best ever. Recovery continuing.
+            # Score-weighted centroid incorporates recent improvements.
+            # Step 60% toward score-weighted centroid.
+            direction = sw_centroid - current
+            p11 = np.clip(current + 0.6 * direction, 0.0, 1.0)
+            cluster = "score-weighted centroid (recent recovery cluster)"
+
+        elif key == "f4":
+            # W10=-4.19, slight dip from W9=-3.99.
+            # Best recent cluster is around centre.
+            # High-score centroid points toward least-bad region.
+            direction = hs_centroid - current
+            p11 = np.clip(current + 0.5 * direction, 0.0, 1.0)
+            cluster = "high-score centroid (least-negative cluster)"
+
+        elif key == "f5":
+            # W10=1668 — new all-time best! Dims 2&3 at 1.0.
+            # The high-score cluster is clearly near [low, ~1, ~1, mid].
+            # Continue pushing: keep dims 2&3 near 1.0,
+            # use centroid to guide dims 1&4.
+            direction = hs_centroid - current
+            dir_norm = direction / (np.linalg.norm(direction) + 1e-8)
+            step_size = np.linalg.norm(direction) * 0.4
+            p11_raw = current + step_size * dir_norm
+            # Force dims 2&3 to stay high — the cluster confirms this
+            p11_raw[1] = min(1.0, p11_raw[1] + 0.02)
+            p11_raw[2] = min(1.0, p11_raw[2] + 0.02)
+            p11 = np.clip(p11_raw, 0.0, 1.0)
+            cluster = "high-score cluster [low,~1,~1,mid] — exploit peak"
+
+        elif key == "f6":
+            # W10=-0.518 best ever. Score-weighted centroid
+            # should now reflect the recovering region.
+            direction = sw_centroid - current
+            p11 = np.clip(current + 0.6 * direction, 0.0, 1.0)
+            cluster = "score-weighted centroid (best-ever W10, keep recovering)"
+
+        elif key in ["f7", "f8"]:
+            # Extremely tight cluster — all points near same coords.
+            # Centroid is essentially the current point.
+            # Tiny step toward score-weighted centroid (best cluster).
+            direction = sw_centroid - current
+            step_size = np.linalg.norm(direction) * 0.3
+            dir_norm = direction / (np.linalg.norm(direction) + 1e-8)
+            p11 = np.clip(current + step_size * dir_norm, 0.0, 1.0)
+            cluster = "tight stable cluster — micro-step toward centroid"
+
+        else:
+            p11 = current
+
+        result[key] = [round(float(x), 6) for x in p11]
+        print(f"  Cluster strategy: {cluster}")
+
+    lines = []
+    for key in result:
+        portal_format = "-".join(f"{x:.6f}" for x in result[key])
+        print(f"\n{key}:")
+        print(f"  Round 10      : {round10[key]}")
+        print(f"  Round 11      : {result[key]}")
+        print(f"  Portal format : {portal_format}")
+        lines.append(f"{key}: {portal_format}")
+    _save(lines, "queries_round11.txt")
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 12 — PCA-guided search
+#
+# Module focus: Principal Component Analysis, dimensionality
+# reduction, variance explanation
+#
+# Strategy:
+#   For each function we have 8 real scored points (W3-W10).
+#   We apply PCA to the input coordinates of those points to
+#   find the principal directions of variation in the search
+#   space. The first principal component (PC1) captures the
+#   direction of maximum variance across all queries.
+#
+#   We then correlate each PC with score improvements to find
+#   the "score-aligned principal direction" — the direction
+#   in input space that explains the most variance AND points
+#   toward higher scores.
+#
+#   This is more principled than gradient-based search because:
+#   - PCA uses ALL historical data, not just the current point
+#   - It identifies structure in the WHOLE search trajectory
+#   - It separates meaningful variation (score-correlated PCs)
+#     from noise (low-variance PCs)
+#
+#   Per-function strategy:
+#   f1: PCA on 2D space — find unexplored PC direction
+#   f2: PC aligned with score increase direction
+#   f3: Continue recovery using score-aligned PC
+#   f4: PC from centre region (post-reset cluster)
+#   f5: PC1 in 4D space — dims 2&3 dominate, stay high
+#   f6: Score-aligned PC from recovery cluster
+#   f7: Micro-step along PC1 (tight cluster)
+#   f8: Micro-step along PC1 (tight cluster)
+# ═══════════════════════════════════════════════════════════════
+
+def run_round12():
+    print("\n" + "=" * 60)
+    print("ROUND 12 PROPOSED QUERIES (PCA-guided search)")
+    print("=" * 60)
+
+    # Real score history W3-W10 (8 points)
+    all_scores = {
+        "f1": [6.36e-25, 2.33e-25, 1.19e-26, 2.64e-27, 1.42e-27, 8.76e-28, 2.68e-9,  3.22e-14],
+        "f2": [0.7247,   0.4346,   0.5414,   0.5306,   0.5819,   0.5375,   0.5730,   0.6305],
+        "f3": [-0.1268,  -0.1590,  -0.1790,  -0.1701,  -0.1620,  -0.1587,  -0.0585,  -0.0472],
+        "f4": [-4.378,   -4.378,   -6.056,   -6.254,   -6.379,   -6.494,   -3.986,   -4.192],
+        "f5": [445.89,   1320.26,  1623.03,  658.43,   542.69,   520.50,   1189.00,  1668.88],
+        "f6": [-0.5522,  -0.6107,  -0.6126,  -0.5762,  -0.5812,  -0.5800,  -0.7636,  -0.5182],
+        "f7": [1.1865,   1.1880,   1.1862,   1.1852,   1.1848,   1.1843,   1.1841,   1.1841],
+        "f8": [8.0703,   8.0724,   8.0712,   8.0712,   8.0598,   8.0593,   8.0590,   8.0590],
+    }
+
+    # Scored rounds W3-W10
+    scored_rounds = [round3, round4, round5, round6, round7, round8, round9, round10]
+
+    def pca_directions(points):
+        """
+        Compute principal components of the query history.
+        Centers the data, computes covariance matrix, returns
+        eigenvectors sorted by descending eigenvalue.
+
+        PC1 = direction of maximum variance in the search history
+        PC2 = direction of second most variance, orthogonal to PC1
+        etc.
+        """
+        X = np.array(points, dtype=np.float64)
+        mean = X.mean(axis=0)
+        X_centered = X - mean
+        cov = np.cov(X_centered.T)
+        if cov.ndim == 0:
+            return np.array([[1.0]]), mean
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        # Sort descending by eigenvalue
+        idx = np.argsort(eigenvalues)[::-1]
+        return eigenvectors[:, idx], mean, eigenvalues[idx]
+
+    def score_aligned_pc(points, scores, pcs):
+        """
+        Find which principal component direction is most aligned
+        with score improvement. For each PC, check if moving in
+        that direction correlates positively with score.
+
+        Returns the PC direction (or its negative) that points
+        toward higher scores — the 'score-aligned principal direction'.
+        """
+        pts   = np.array(points, dtype=np.float64)
+        s     = np.array(scores, dtype=np.float64)
+        mean  = pts.mean(axis=0)
+        X_c   = pts - mean
+
+        best_corr = -np.inf
+        best_dir  = pcs[:, 0]
+
+        for i in range(pcs.shape[1]):
+            pc = pcs[:, i]
+            # Project each point onto this PC
+            projections = X_c @ pc
+            # Correlation between projection and score
+            if np.std(projections) < 1e-10:
+                continue
+            corr = np.corrcoef(projections, s)[0, 1]
+            if abs(corr) > abs(best_corr):
+                best_corr = corr
+                # Flip direction if negatively correlated
+                best_dir = pc if corr > 0 else -pc
+
+        return best_dir, best_corr
+
+    result = {}
+
+    for key in round1:
+        scores  = all_scores[key]
+        points  = [np.array(r[key], dtype=np.float32) for r in scored_rounds]
+        dim     = len(points[0])
+        current = np.array(round11[key], dtype=np.float32)
+
+        best_idx   = int(np.argmax(scores))
+        best_score = scores[best_idx]
+        curr_score = scores[-1]  # W10
+
+        # Boundary correction
+        for d in range(dim):
+            if current[d] <= 0.01: current[d] = 0.05
+            elif current[d] >= 0.99: current[d] = 0.95
+
+        # Compute PCA on scored history
+        pcs, mean, eigenvalues = pca_directions(points)
+        variance_explained = eigenvalues / (eigenvalues.sum() + 1e-10)
+
+        # Find score-aligned principal direction
+        score_dir, corr = score_aligned_pc(points, scores, pcs)
+        score_dir = score_dir.astype(np.float32)
+
+        print(f"\n{'─'*50}")
+        print(f"  {key}: W10={curr_score:.4f} | best=W{best_idx+3}({best_score:.4f})")
+        print(f"  PC1 variance explained : {variance_explained[0]:.1%}")
+        print(f"  Score-PC correlation   : {corr:.3f}")
+
+        if key == "f1":
+            # All scores ~0. PCA reveals the main direction of
+            # variance in our search trajectory. Explore orthogonal
+            # to where we've already been (PC2 = unexplored direction).
+            if pcs.shape[1] > 1:
+                unexplored = pcs[:, 1].astype(np.float32)
+            else:
+                unexplored = score_dir
+            step_size = 0.12
+            p12 = np.clip(current + step_size * unexplored, 0.0, 1.0)
+            reason = f"PC2 direction (unexplored axis, PC1 var={variance_explained[0]:.1%})"
+
+        elif key == "f2":
+            # Score-aligned PC points toward higher-score region.
+            # Step along it from current point.
+            recent_steps = [np.linalg.norm(np.array(scored_rounds[i][key]) -
+                            np.array(scored_rounds[i-1][key]))
+                            for i in range(1, len(scored_rounds))]
+            step_size = np.mean(recent_steps) * 0.6
+            p12 = np.clip(current + step_size * score_dir, 0.0, 1.0)
+            reason = f"score-aligned PC (corr={corr:.3f})"
+
+        elif key == "f3":
+            # Recovery continuing. Score-aligned PC captures the
+            # direction of improvement toward centre region.
+            step_size = 0.05
+            p12 = np.clip(current + step_size * score_dir, 0.0, 1.0)
+            reason = f"score-aligned PC (recovery direction, corr={corr:.3f})"
+
+        elif key == "f4":
+            # Best cluster is around centre. Score-aligned PC
+            # from post-reset data points toward least-bad region.
+            step_size = 0.07
+            p12 = np.clip(current + step_size * score_dir, 0.0, 1.0)
+            reason = f"score-aligned PC from centre cluster (corr={corr:.3f})"
+
+        elif key == "f5":
+            # f5 PC1 will be dominated by dims 2&3 (most variance,
+            # highest scores when near 1.0). Step strongly along
+            # score-aligned PC — this is f5's peak direction.
+            recent_steps = [np.linalg.norm(np.array(scored_rounds[i][key]) -
+                            np.array(scored_rounds[i-1][key]))
+                            for i in range(1, len(scored_rounds))]
+            step_size = np.mean(recent_steps) * 0.5
+            p12_raw = current + step_size * score_dir
+            # Keep dims 2&3 high — cluster and PCA both confirm this
+            p12_raw[1] = max(p12_raw[1], 0.95)
+            p12_raw[2] = max(p12_raw[2], 0.95)
+            p12 = np.clip(p12_raw, 0.0, 1.0)
+            reason = f"score-aligned PC1 (var={variance_explained[0]:.1%}, corr={corr:.3f})"
+
+        elif key == "f6":
+            # Best-ever at W10. Score-aligned PC should reflect
+            # the improvement direction from the recovery.
+            step_size = 0.05
+            p12 = np.clip(current + step_size * score_dir, 0.0, 1.0)
+            reason = f"score-aligned PC (best-ever W10, corr={corr:.3f})"
+
+        elif key in ["f7", "f8"]:
+            # Extremely tight cluster. PC1 variance explains nearly
+            # all variation. Micro-step along score-aligned PC.
+            step_size = 0.002
+            p12 = np.clip(current + step_size * score_dir, 0.0, 1.0)
+            reason = f"micro-step along score-aligned PC (tight cluster, corr={corr:.3f})"
+
+        else:
+            p12 = current
+
+        result[key] = [round(float(x), 6) for x in p12]
+        print(f"  Reason: {reason}")
+
+    lines = []
+    for key in result:
+        portal_format = "-".join(f"{x:.6f}" for x in result[key])
+        print(f"\n{key}:")
+        print(f"  Round 11      : {round11[key]}")
+        print(f"  Round 12      : {result[key]}")
+        print(f"  Portal format : {portal_format}")
+        lines.append(f"{key}: {portal_format}")
+    _save(lines, "queries_round12.txt")
+
+
 # ═══════════════════════════════════════════════════════════════
 # HELPER — Save results to ../results/
 # ═══════════════════════════════════════════════════════════════
@@ -845,8 +1256,8 @@ def _save(lines, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BBO Capstone - Query Generator")
     parser.add_argument(
-        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10],
-        help="Which round to run (2-10). Omit to run all."
+        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        help="Which round to run (2-12). Omit to run all."
     )
     args = parser.parse_args()
 
@@ -859,7 +1270,9 @@ if __name__ == "__main__":
     elif args.round == 8: run_round8()
     elif args.round == 9: run_round9()
     elif args.round == 10: run_round10()
+    elif args.round == 11: run_round11()
+    elif args.round == 12: run_round12()
     else:
         run_round2(); run_round3(); run_round4()
         run_round5(); run_round6(); run_round7()
-        run_round8(); run_round9(); run_round10()
+        run_round8(); run_round9(); run_round10(); run_round11(); run_round12()
