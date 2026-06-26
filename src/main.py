@@ -1,5 +1,5 @@
 # src/main.py
-# BBO Capstone - Full Query Strategy (Rounds 1-12)
+# BBO Capstone - Full Query Strategy (Rounds 1-13)
 # Imperial College / Emeritus PCMLAI Capstone
 #
 # USAGE:
@@ -14,6 +14,7 @@
 #   python main.py --round 10  → generate Round 10 (real-score surrogate + interpretable)
 #   python main.py --round 11  → generate Round 11 (clustering-based strategy)
 #   python main.py --round 12  → generate Round 12 (PCA-guided search)
+#   python main.py --round 13  → generate Round 13 (FINAL — pure exploitation)
 #   python main.py             → runs all rounds in sequence
 #
 # REQUIREMENTS:
@@ -22,7 +23,7 @@
 import argparse
 import numpy as np
 import os
-from data_loader import round1, round2, round3, round4, round5, round6, round7, round8, round9, round10, round11
+from data_loader import round1, round2, round3, round4, round5, round6, round7, round8, round9, round10, round11, round12
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 
@@ -1233,6 +1234,142 @@ def run_round12():
     _save(lines, "queries_round12.txt")
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# ROUND 13 — FINAL ROUND
+# Reinforcement Learning lens: MAB, Q-learning, MDP
+#
+# This is the last query. No recovery is possible.
+# Strategy: pure exploitation of confirmed best regions.
+#
+# RL parallels:
+#   - MAB (Multi-Armed Bandit): each function is an "arm".
+#     With the final pull, we choose the action with the
+#     highest estimated Q-value based on all observed rewards.
+#   - Q-learning: our score history is the Q-table.
+#     The greedy policy selects argmax Q(s, a) — the best
+#     known action from the best known state.
+#   - MDP feedback-driven adaptation: the full trajectory
+#     is our experience replay. Round 13 uses the complete
+#     history to select the final policy action.
+#
+# Full real score history W3-W12 (W11 estimated):
+#   f1: ~0 everywhere — submit near best centroid
+#   f2: best W3 (0.7247), W12=0.605, dipping — return to W3 region
+#   f3: best W10 (-0.047), W12=-0.083 dipping — return to W10 point
+#   f4: best W9 (-3.986), W12=-4.122 slight dip — return to W9 point
+#   f5: best W10 (1668), W12=1412 — overshot, pull back dims 2&3
+#   f6: best W10 (-0.518), W12=-0.556 — return to W10 point
+#   f7: best W4 (1.188), W12=1.182 tiny dip — return to W4 region
+#   f8: best W4 (8.072), W12=8.066 — submit W4 point (best ever)
+# ═══════════════════════════════════════════════════════════════
+
+def run_round13():
+    print("\n" + "=" * 60)
+    print("ROUND 13 — FINAL ROUND (RL-informed pure exploitation)")
+    print("=" * 60)
+
+    # Full score history W3-W12 (W11 interpolated)
+    all_scores = {
+        "f1": [6.36e-25, 2.33e-25, 1.19e-26, 2.64e-27, 1.42e-27, 8.76e-28, 2.68e-9,  3.22e-14, 2.68e-9,  3.80e-35],
+        "f2": [0.7247,   0.4346,   0.5414,   0.5306,   0.5819,   0.5375,   0.5730,   0.6305,   0.6180,   0.6050],
+        "f3": [-0.1268,  -0.1590,  -0.1790,  -0.1701,  -0.1620,  -0.1587,  -0.0585,  -0.0472,  -0.0651,  -0.0829],
+        "f4": [-4.378,   -4.378,   -6.056,   -6.254,   -6.379,   -6.494,   -3.986,   -4.192,   -4.157,   -4.122],
+        "f5": [445.89,   1320.26,  1623.03,  658.43,   542.69,   520.50,   1189.00,  1668.88,  1540.66,  1412.44],
+        "f6": [-0.5522,  -0.6107,  -0.6126,  -0.5762,  -0.5812,  -0.5800,  -0.7636,  -0.5182,  -0.5371,  -0.5560],
+        "f7": [1.1865,   1.1880,   1.1862,   1.1852,   1.1848,   1.1843,   1.1841,   1.1841,   1.1831,   1.1822],
+        "f8": [8.0703,   8.0724,   8.0712,   8.0712,   8.0598,   8.0593,   8.0590,   8.0590,   8.0623,   8.0656],
+    }
+
+    # All scored rounds W3-W12
+    scored_rounds = [round3, round4, round5, round6, round7,
+                     round8, round9, round10, round11, round12]
+
+    result = {}
+
+    for key in round1:
+        scores = all_scores[key]
+        points = [np.array(r[key], dtype=np.float32) for r in scored_rounds]
+        dim    = len(points[0])
+
+        best_idx   = int(np.argmax(scores))
+        best_score = scores[best_idx]
+        best_point = points[best_idx].copy()
+        curr_score = scores[-1]
+
+        print(f"\n{'─'*50}")
+        print(f"  {key}: best=W{best_idx+3}({best_score:.4f}) | W12={curr_score:.4f}")
+
+        if key == "f1":
+            # All scores ~0, best was W9 (2.68e-9).
+            # Submit score-weighted centroid of top-3 points.
+            top_idx = np.argsort(scores)[-3:]
+            p13 = np.array([points[i] for i in top_idx]).mean(axis=0)
+            reason = "centroid of top-3 points (best available for flat function)"
+
+        elif key == "f2":
+            # Best was W3 (0.7247). W12 dipping.
+            # Submit W3 point directly — highest ever observed.
+            p13 = best_point
+            reason = f"W3 best point (0.7247, highest ever observed)"
+
+        elif key == "f3":
+            # Best was W10 (-0.047). W12 dipping back.
+            # Submit W10 point directly.
+            p13 = best_point
+            reason = f"W10 best point (-0.047, best ever for f3)"
+
+        elif key == "f4":
+            # Best was W9 (-3.986). W12=-4.122, dipping.
+            # Submit W9 point directly.
+            p13 = best_point
+            reason = f"W9 best point (-3.986, best ever for f4)"
+
+        elif key == "f5":
+            # Best W10 (1668). W12=1412 — overshot as dims 2&3
+            # pushed too close to 1.0. Pull them back slightly.
+            # Submit W10 point but with dims 2&3 at 0.96 instead of ~1.0
+            p13 = best_point.copy()
+            p13[1] = min(p13[1], 0.960)  # pull dim2 back from boundary
+            p13[2] = min(p13[2], 0.960)  # pull dim3 back from boundary
+            p13 = np.clip(p13, 0.0, 1.0)
+            reason = f"W10 best point with dims 2&3 pulled to 0.96 (overshot correction)"
+
+        elif key == "f6":
+            # Best W10 (-0.518). W12=-0.556 dipping.
+            # Submit W10 point directly.
+            p13 = best_point
+            reason = f"W10 best point (-0.518, best ever for f6)"
+
+        elif key == "f7":
+            # Best W4 (1.188). Very stable.
+            # Submit W4 point — best ever observed.
+            p13 = best_point
+            reason = f"W4 best point (1.1880, best ever for f7)"
+
+        elif key == "f8":
+            # Best W4 (8.0724). W12=8.0656, slight improvement trend.
+            # Submit W4 point — best ever observed.
+            p13 = best_point
+            reason = f"W4 best point (8.0724, best ever for f8)"
+
+        else:
+            p13 = points[-1]
+
+        result[key] = [round(float(x), 6) for x in p13]
+        print(f"  Strategy: {reason}")
+
+    lines = []
+    for key in result:
+        portal_format = "-".join(f"{x:.6f}" for x in result[key])
+        print(f"\n{key}:")
+        print(f"  Round 12      : {round12[key]}")
+        print(f"  Round 13      : {result[key]}")
+        print(f"  Portal format : {portal_format}")
+        lines.append(f"{key}: {portal_format}")
+    _save(lines, "queries_round13.txt")
+
+
 # ═══════════════════════════════════════════════════════════════
 # HELPER — Save results to ../results/
 # ═══════════════════════════════════════════════════════════════
@@ -1256,8 +1393,8 @@ def _save(lines, filename):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BBO Capstone - Query Generator")
     parser.add_argument(
-        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-        help="Which round to run (2-12). Omit to run all."
+        "--round", type=int, choices=[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        help="Which round to run (2-13). Omit to run all."
     )
     args = parser.parse_args()
 
@@ -1272,7 +1409,9 @@ if __name__ == "__main__":
     elif args.round == 10: run_round10()
     elif args.round == 11: run_round11()
     elif args.round == 12: run_round12()
+    elif args.round == 13: run_round13()
     else:
         run_round2(); run_round3(); run_round4()
         run_round5(); run_round6(); run_round7()
-        run_round8(); run_round9(); run_round10(); run_round11(); run_round12()
+        run_round8(); run_round9(); run_round10()
+        run_round11(); run_round12(); run_round13()
