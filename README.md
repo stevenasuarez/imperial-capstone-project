@@ -1,177 +1,138 @@
-# Black-Box Optimisation Capstone
-### Imperial College London · Professional Certificate in Machine Learning & AI
+Black-Box Optimisation Capstone
 
----
+Imperial College London · Professional Certificate in Machine Learning & AI
 
-## Section 1: Project Overview
 
-This project tackles a **Black-Box Optimisation (BBO)** challenge — the task of finding the best inputs to a set of unknown functions without ever seeing their equations. The only feedback available is the output value returned by an oracle after each query is submitted.
+For Everyone: What This Project Does
 
-The project spans eight unknown functions of varying dimensionality (2D through 8D). Over multiple rounds, each query is one carefully chosen point in the input space. The challenge is to find high-performing regions using as few queries as possible.
+This project tackles a puzzle: how do you find the best settings for a system when you can't see inside it? Imagine trying to tune a recipe where you can only taste the result once a week, with no access to the ingredient list. Over thirteen weeks, I submitted one set of inputs per function to a scoring system and used the results to make smarter guesses each week. My strategy evolved from simple intuition to machine learning models guided by real feedback. The clearest win was Function 5, which reached a score of 1,668 — more than three times its starting value — by identifying which two of its four inputs matter most and pushing them toward their optimal values.
 
-**Why does this matter in real-world ML?**
+
+Documentation
+
+DocumentDescriptionDATASHEET.mdDataset documentation — composition, collection process, gaps and terms of useMODEL_CARD.mdModel card — strategy overview, performance summary, assumptions and limitationsnotebooks/bbo_analysis.ipynbFull analysis notebook with visualisations and results
+
+
+Section 1: Project Overview
+
+This project tackles a Black-Box Optimisation (BBO) challenge — the task of finding the best inputs to a set of unknown functions without ever seeing their equations. The only feedback available is the output value returned by an oracle after each query is submitted.
+
+The project spans eight unknown functions of varying dimensionality (2D through 8D). Over thirteen rounds, each query is one carefully chosen point in the input space. The challenge is to find high-performing regions using as few evaluations as possible.
+
+Why does this matter in real-world ML?
 BBO is everywhere: hyperparameter tuning for neural networks, drug dosage optimisation in clinical trials, A/B test design, and materials science experimentation all share the same structure — an expensive, opaque objective function that you can only probe one point at a time. Learning to search efficiently under these constraints is a core applied ML skill.
 
-**Career relevance:**
-As a QA Automation Engineer at a software enterprise, I work daily with systems whose behaviour is not always fully predictable — tests pass or fail based on complex interactions that are not always transparent. The BBO framework maps directly onto that reality: you probe a system, observe an outcome, and decide where to look next. This programme was my entry point into the ML world, and this capstone is where abstract concepts like surrogate modelling and decision-making under uncertainty become concrete and applicable. The skills developed here — designing efficient experiments, interpreting signals with limited data, and iterating systematically — translate directly into smarter test strategy design and, longer term, into ML-assisted QA pipelines.
+Career relevance:
+As a QA Automation Engineer at a software enterprise, I work daily with systems whose behaviour is not always fully predictable — tests pass or fail based on complex interactions that are not always transparent. The BBO framework maps directly onto that reality: you probe a system, observe an outcome, and decide where to look next. The skills developed here — designing efficient experiments, interpreting signals with limited data, and iterating systematically — translate directly into smarter test strategy design and, longer term, into ML-assisted QA pipelines.
 
----
 
-## Section 2: Inputs and Outputs
+Section 2: Inputs and Outputs
 
-**Inputs — query format:**
-Each query is a vector of coordinates, one per dimension, where every value is a float in the range `[0.0, 1.0]` specified to six decimal places. Queries are submitted in the following format:
+Inputs — query format:
+Each query is a vector of coordinates, one per dimension, where every value is a float in the range [0.0, 1.0] specified to six decimal places:
 
-```
 x1-x2-x3-...-xn
-```
 
 Example for a 3D function:
-```
+
 0.150000-0.220000-0.400000
-```
 
-The eight functions have the following dimensionalities:
+Function dimensionalities:
 
-| Function | Dimensions |
-|----------|-----------|
-| f1 | 2 |
-| f2 | 2 |
-| f3 | 3 |
-| f4 | 4 |
-| f5 | 4 |
-| f6 | 5 |
-| f7 | 6 |
-| f8 | 8 |
+FunctionDimensionsBest ScoreBest Weekf12~3×10⁻¹⁴W9f220.7247W3f33−0.047W10f44−3.986W9f541668.88W10f65−0.518W10f761.188W4f888.072W4
 
-**Outputs:**
-After each submission round, the oracle returns a single scalar performance value for each function. Larger values are better — every function is framed as a maximisation task. The internal structure of the function (whether smooth, multimodal, noisy, or separable) is never revealed, which is what makes this a true black-box problem.
+Outputs:
+After each submission round, the oracle returns a single scalar performance value per function. Larger values are better — every function is a maximisation task. The internal structure is never revealed.
 
----
 
-## Section 3: Challenge Objectives
+Section 3: Challenge Objectives
 
-The goal is to **maximise** the output of each unknown function, subject to the following constraints:
+The goal is to maximise the output of each unknown function, subject to:
 
-- **One query per function per round** — you cannot evaluate many points simultaneously
-- **Inputs must lie in [0, 1]** for every dimension
-- **No access to gradients** — derivative-free optimisation only
-- **No knowledge of function structure** — the function could be non-convex, discontinuous, or high-dimensional with irrelevant features
 
-These constraints make naive grid search or random search highly inefficient, especially for higher-dimensional functions (f7, f8), where the volume of the search space grows exponentially with dimension.
+One query per function per round — no simultaneous evaluations
+Inputs must lie in [0, 1] for every dimension
+No access to gradients — derivative-free optimisation only
+No knowledge of function structure — could be non-convex, discontinuous, or high-dimensional
 
----
 
-## Section 4: Technical Approach
 
-**Round 1 — Broad initialisation:**
-Initial queries were placed using spatial intuition and broad coverage of the input domain, avoiding boundary regions. No model guided this round — it was a deliberate first probe.
+Section 4: Technical Approach
 
-**Round 2 — Directional refinement:**
-Coordinates were adjusted based on observed direction of change. Lower-dimensional functions received conservative nudges; higher-dimensional functions received larger exploratory jumps.
+Round 1 — Broad initialisation:
+Spatial intuition, broad coverage. No model.
 
-**Round 3 — SVM-guided search:**
-A linear Support Vector Machine was introduced. Round 1 and Round 2 points were labelled as baseline (0) and improved (1). The SVM weight vector defines a direction in input space pointing toward the improved region. Round 3 queries were generated by stepping along this direction from Round 2 with `step_scale=0.5`.
+Round 2 — Directional refinement:
+Manual coordinate adjustments. Conservative nudges for low-dimensional functions, larger jumps for high-dimensional ones.
 
-**Round 4 — Neural network surrogate (numpy, manual backprop):**
-A fully-connected neural network was built from scratch using numpy only. All 3 prior rounds were used as training data with synthetic progressive labels (R1=0.0, R2=0.5, R3=1.0). Manual backpropagation computed `d(output)/d(input)` at the Round 3 point — the input gradient pointing toward higher predicted performance. Step scale reduced to 0.4.
+Round 3 — SVM-guided search:
+Linear SVM trained on two labelled points per function. Weight vector used as search direction. step_scale=0.5.
 
-**Round 5 — PyTorch surrogate + autograd:**
-The surrogate was upgraded to PyTorch, replacing manual backpropagation with automatic differentiation via `torch.autograd`. Architecture deepened to 32→16→8→1. The Adam optimiser replaced plain gradient descent. Step scale reduced to 0.35.
+Round 4 — Numpy NN surrogate (manual backprop):
+Three-layer network (16→8→1) built from scratch. Synthetic labels (0.0, 0.5, 1.0). Manual chain-rule backpropagation. step_scale=0.4.
 
-**Round 6 — Dimension-aware pooling:**
-Inspired by CNN pooling, a dimension activity mask was introduced: coordinates that moved more across previous rounds were amplified in the gradient; inactive dimensions were dampened. Boundary-aware stepping added to handle coordinates hitting 0.0/1.0 walls. Step scale 0.3.
+Round 5 — PyTorch surrogate + autograd:
+Upgraded to PyTorch (32→16→8→1). Automatic differentiation replaces manual backprop. Adam optimiser. step_scale=0.35.
 
-**Round 7 — Hyperparameter grid search:**
-Grid search over learning rate `[0.001, 0.005, 0.01, 0.05]` and hidden layer width `[16, 32]` using leave-one-out cross-validation on the 6 accumulated points per function. First round where surrogate configuration was data-driven rather than manually decided. Step scale auto-selected from `[0.2, 0.3, 0.4]`.
+Round 6 — Dimension-aware pooling (CNN-inspired):
+Activity mask from historical coordinate movement amplifies active dimensions, dampens inactive ones. Boundary correction added. step_scale=0.3.
 
-**Round 8 — Transformer attention-weighted gradient:**
-Transformer-style scaled dot-product attention applied across the time dimension of the search history. Each previous round treated as a token; the current query as the query vector. Attention scores `softmax(QK^T / sqrt(d))` determined which historical rounds were most relevant. Gradient combined 60% surrogate direction + 40% attention-weighted historical movement. Step scale 0.25.
+Round 7 — Hyperparameter grid search:
+Grid search over learning rate [0.001, 0.005, 0.01, 0.05] and hidden size [16, 32]. Leave-one-out cross-validation selects best config per function.
 
-**Round 9 — Real score-guided strategy (major upgrade):**
-Oracle scores received via email for Weeks 3–8. Synthetic labelling abandoned entirely. Full score history analysed to determine per-function strategy:
+Round 8 — Transformer attention-weighted gradient:
+Scaled dot-product attention softmax(QK^T / sqrt(d)) over query history. Gradient blended 60/40 with attention-weighted historical direction. step_scale=0.25.
 
-| Function | Score trend | Strategy |
-|----------|-------------|----------|
-| f1 | ~0 all rounds | Reset to centre [0.5, 0.5] |
-| f2 | Best at Week 3 (0.72) | Return 60% toward best point |
-| f3 | Consistently negative | Reset 70% toward centre |
-| f4 | Getting worse each round | Hard reset to centre |
-| f5 | Peaked Week 5 (1623), declined | Return 70% toward Week 5 coordinates |
-| f6 | Consistently negative | Reset 70% toward centre |
-| f7 | Stable positive (1.184–1.188) | Small continuation step |
-| f8 | Stable positive (8.059–8.072) | Small continuation step |
+Round 9 — Real score-guided strategy (major upgrade):
+Oracle scores received for Weeks 3–8. Synthetic labelling abandoned. Per-function strategy based on score trends:
 
-**Exploration vs. exploitation balance:**
-Early rounds prioritised exploration with no ground truth available. From Round 9, real scores drive strategy — exploitation for positive stable functions (f7, f8), recovery for functions that drifted from their best region (f2, f5), and full reset for functions in clearly wrong areas (f1, f3, f4, f6).
+FunctionScore trendStrategyf1~0 all roundsReset to centref2Best at W3Return toward best pointf3Consistently negativeReset toward centref4Getting worseHard reset to centref5Peaked W5, declinedReturn toward W5 coordinatesf6Consistently negativeReset toward centref7Stable positiveSmall continuation stepf8Stable positiveSmall continuation step
 
-**Key insight from real scores:**
-The synthetic progressive labelling assumption (each round improves on the last) was incorrect for most functions. f5's best score occurred at Week 5 (1623) and the search drifted away from that region for three subsequent rounds, reducing the score to 520. Real feedback fundamentally changes the strategy and validates the importance of oracle scores in BBO.
+Round 10 — Real-score surrogate + interpretable decisions:
+Surrogate trained on real normalised oracle scores. Every decision printed with explicit reasoning at runtime.
 
-**This is a living document** — the approach will continue to evolve as more data becomes available.
+Round 11 — Clustering-based strategy:
+Score-weighted centroid and high-score cluster centroid (top-3 points) computed per function. Queries stepped toward the most promising cluster.
 
----
+Round 12 — PCA-guided search:
+Principal components computed from scored query history. Score-aligned PC (highest correlation with oracle output) used as search direction. PC1 variance explained reported per function.
 
-## Usage
+Round 13 — Final round: pure exploitation:
+No surrogate, no gradient. Each function submits its single best historical point directly — the greedy argmax policy from Q-learning applied to the full score history.
 
-### Requirements
+Key insight from the full project:
+The synthetic progressive labelling assumption (each round improves on the last) was incorrect for most functions. f5's best score occurred at Week 5 (1623) and the search drifted away for three rounds before real scores enabled recovery. Real feedback always supersedes model assumptions.
 
-```bash
-pip install -r requirements.txt
-```
 
-### Running a specific round
+Usage
 
-Navigate into the `src/` folder first:
+Requirements
 
-```bash
-cd src
-```
+bashpip install -r requirements.txt
 
-Then run the desired round:
+Running a specific round
 
-```bash
-python main.py --round 2   # Analyse Round 1 → Round 2 changes
-python main.py --round 3   # Generate Round 3 queries (SVM-guided)
-python main.py --round 4   # Generate Round 4 queries (numpy NN + manual backprop)
-python main.py --round 5   # Generate Round 5 queries (PyTorch + autograd)
-python main.py --round 6   # Generate Round 6 queries (dimension-aware pooling)
-python main.py --round 7   # Generate Round 7 queries (hyperparameter grid search)
-python main.py --round 8   # Generate Round 8 queries (attention-weighted gradient)
-python main.py --round 9   # Generate Round 9 queries (real score-guided strategy)
-```
+bashcd src
+python main.py --round 3    # SVM-guided
+python main.py --round 9    # Real score-guided
+python main.py --round 13   # Final round
+python main.py              # All rounds in sequence
 
-To run all rounds in sequence:
+Results saved automatically to results/queries_roundN.txt.
 
-```bash
-python main.py
-```
+Project structure
 
-Results are saved automatically to `results/queries_roundN.txt`.
-
-### Project structure
-
-```
 Capstone/
 ├── src/
-│   ├── main.py          # All round strategies (2-9) in one unified script
-│   └── data_loader.py   # All query data across rounds 1-9
+│   ├── main.py          # All round strategies (2-13)
+│   └── data_loader.py   # All query coordinates rounds 1-13
 ├── results/
-│   ├── queries_round1.txt
-│   ├── queries_round2.txt
-│   ├── queries_round3.txt
-│   ├── queries_round4.txt
-│   ├── queries_round5.txt
-│   ├── queries_round6.txt
-│   ├── queries_round7.txt
-│   ├── queries_round8.txt
-│   └── queries_round9.txt
+│   └── queries_round*.txt
 ├── notebooks/
-│   └── stage2_analysis.ipynb
+│   └── bbo_analysis.ipynb
+├── DATASHEET.md
+├── MODEL_CARD.md
 ├── requirements.txt
 └── README.md
-```
 
----
-
-*Project developed as part of the Imperial College London / Emeritus PCMLAI programme.*
+Developed as part of the Imperial College London / Emeritus PCMLAI programme.

@@ -1,121 +1,85 @@
-# Model Card: BBO Capstone Optimisation Approach
+Model Card: BBO Capstone Optimisation Approach
 
-**Imperial College London / Emeritus PCMLAI Programme**
-**Author:** Steven Suarez | **Last updated:** Round 10
+Imperial College London / Emeritus PCMLAI Programme
+Author: Steven Suarez | Last updated: Round 13 (final)
 
----
 
-## Overview
+Overview
 
-| Field | Detail |
-|-------|--------|
-| **Name** | Score-Guided Surrogate BBO Strategy |
-| **Type** | Iterative black-box optimisation with neural network surrogate |
-| **Version** | Round 10 (final programme version) |
-| **Repository** | https://github.com/stevenasuarez/imperial-capstone-project |
-| **Entry point** | `python src/main.py --round N` |
+FieldDetailNameScore-Guided Surrogate BBO StrategyTypeIterative black-box optimisation with neural network surrogateVersionRound 13 — FinalRepositoryhttps://github.com/stevenasuarez/imperial-capstone-projectEntry pointpython src/main.py --round N
 
----
 
-## Intended Use
+Intended Use
 
-**Suitable for:**
-- Iterative optimisation of unknown scalar functions where only input-output pairs are observable
-- Settings where the query budget is extremely limited (one query per function per round)
-- Educational demonstration of surrogate-assisted BBO strategy evolution
-- Benchmarking simple neural network surrogates against heuristic baselines
+Suitable for:
 
-**Use cases to avoid:**
-- Functions with known structure — gradient-based or analytical methods are more efficient
-- High-frequency real-time optimisation — the strategy requires retraining per round
-- Settings requiring uncertainty quantification — the current surrogate provides point estimates only, not confidence intervals
-- Functions with discontinuities or multimodal surfaces — the gradient-based surrogate assumes local smoothness
 
----
+Iterative optimisation of unknown scalar functions where only input-output pairs are observable
+Settings where the query budget is extremely limited (one evaluation per function per round)
+Educational demonstration of surrogate-assisted BBO strategy evolution
+Benchmarking simple neural network surrogates against heuristic baselines
 
-## Strategy Details — Evolution Across Ten Rounds
 
-**Round 1 — Heuristic initialisation:**
-Queries placed by intuition across the input domain. No model. Purpose: establish a starting point before any feedback is available.
+Use cases to avoid:
 
-**Round 2 — Directional refinement:**
-Manual coordinate adjustments based on spatial reasoning. Conservative nudges for low-dimensional functions, larger jumps for high-dimensional ones.
 
-**Round 3 — SVM-guided search:**
-Linear SVM trained on two labelled points per function. The weight vector (normal to the decision boundary) was used as the search direction. `step_scale=0.5`.
+Functions with known structure — gradient-based or analytical methods are more efficient
+High-frequency real-time optimisation — strategy requires retraining per round
+Settings requiring uncertainty quantification — current surrogate provides point estimates only
+Functions with sharp discontinuities or multimodal surfaces at fine scale
 
-**Round 4 — Numpy NN surrogate with manual backpropagation:**
-Three-layer fully-connected network (16→8→1) built from scratch in numpy. Synthetic labels (0.0, 0.5, 1.0). Manual chain rule backpropagation to compute input gradients. `step_scale=0.4`.
 
-**Round 5 — PyTorch surrogate + autograd:**
-Upgraded to PyTorch (32→16→8→1). Automatic differentiation replaces manual backpropagation. Adam optimiser. `step_scale=0.35`.
 
-**Round 6 — Dimension-aware pooling (CNN-inspired):**
-Activity mask computed from historical coordinate movement. High-activity dimensions amplified, low-activity dimensions dampened — analogous to CNN max-pooling over the time axis. Boundary correction introduced. `step_scale=0.3`.
+Strategy Details — All Thirteen Rounds
 
-**Round 7 — Hyperparameter grid search with LOO-CV:**
-Grid search over learning rate [0.001, 0.005, 0.01, 0.05] and hidden size [16, 32]. Leave-one-out cross-validation selects best configuration per function. Step scale auto-selected from [0.2, 0.3, 0.4].
+RoundMethodKey concept1Heuristic initialisationBroad spatial coverage, no model2Directional refinementManual coordinate adjustment3Linear SVMDecision boundary weight vector as search direction4Numpy NN (manual backprop)Explicit chain-rule gradient computation5PyTorch + autogradAutomatic differentiation, Adam optimiser6Dimension-aware poolingCNN-inspired activity mask on gradient7Hyperparameter grid searchLOO cross-validation, tunable lr and architecture8Transformer attentionScaled dot-product attention over query history9Real score-guidedOracle scores replace synthetic labels entirely10Interpretable surrogateReal normalised scores, per-function reasoning printed11ClusteringScore-weighted centroid and high-score cluster centroid12PCA-guidedScore-aligned principal component as search direction13Pure exploitationGreedy argmax — best historical point per function
 
-**Round 8 — Transformer attention-weighted gradient:**
-Scaled dot-product attention `softmax(QK^T / sqrt(d))` applied across the round history. Current query is Q; previous rounds are K. Attention-weighted historical direction blended 40/60 with surrogate gradient. `step_scale=0.25`.
 
-**Round 9 — Real score-guided strategy:**
-Oracle scores received for Rounds 3–8. Synthetic labelling abandoned. Per-function strategy based on score trends: exploit (f5), continue (f2, f7, f8), reset (f1, f4), reverse (f3, f6).
+Performance
 
-**Round 10 — Real-score surrogate + interpretable decisions:**
-Surrogate trained on real normalised oracle scores. Every decision documented with explicit reasoning printed at runtime. Per-function strategies differentiated by trend analysis across seven weeks of real data.
+Score summary — best observed across all rounds:
 
----
+FunctionBest ScoreWeekFinal Statusf1~2.68×10⁻⁹W9❌ Unsolved — near-zero everywheref20.7247W3🟡 Moderate — best early, recovered latef3−0.0472W10🟡 Negative but improvingf4−3.986W9🟡 Negative, improved significantly after resetf51668.88W10🟢 Dominant function, 3× initial valuef6−0.518W10🟡 Negative but best-ever after recoveryf71.1880W4🟢 Stable positive, near-optimalf88.0724W4🟢 Stable positive, near-optimal
 
-## Performance
+Key finding:
+f5 dominates all other functions by two orders of magnitude. The strategy correctly identified the f5 peak region at Week 5 but drifted away from it in Rounds 6–8 due to synthetic label bias, recovering to a new all-time best (1668) in Round 10 after real scores became available.
 
-**Score summary across functions (best observed score, week achieved):**
+f7 and f8 converged to stable local optima by Round 4 and remained there throughout — PCA confirmed >88% of variance explained by a single tight cluster, indicating these functions were effectively solved early.
 
-| Function | Best Score | Week | Current Trend | Status |
-|----------|-----------|------|---------------|--------|
-| f1 | ~2.68e-9 | W9 | ~0 everywhere | ❌ No viable region found |
-| f2 | 0.7247 | W3 | Noisy, 0.57 at W9 | 🟡 Moderate |
-| f3 | −0.0585 | W9 | Improving after reset | 🟡 Recovering |
-| f4 | −3.986 | W9 | Improving after reset | 🟡 Recovering |
-| f5 | 1623.03 | W5 | 1189 at W9, recovering | 🟢 High value |
-| f6 | −0.5522 | W3 | Fluctuating negative | 🔴 Negative |
-| f7 | 1.1880 | W4 | Stable 1.184 | 🟢 Stable positive |
-| f8 | 8.0724 | W4 | Stable 8.059 | 🟢 Stable positive |
+f1 remained near zero across all thirteen rounds. The function likely has an extremely narrow peak in a region never sampled. Gradient-based surrogates cannot locate such peaks without first landing near them.
 
-**Metric:** Oracle scalar output (maximisation objective). No normalisation applied to reported scores — raw oracle values used for comparability.
 
-**Key finding:** f5 dominates all other functions by two orders of magnitude. The strategy correctly identified the f5 peak region at Week 5 but drifted away from it in Rounds 6–8 due to synthetic label bias, recovering in Rounds 9–10 after real scores became available.
+Assumptions and Limitations
 
----
+Core assumptions:
 
-## Assumptions and Limitations
 
-**Core assumptions:**
+Monotonic improvement (Rounds 3–8): Synthetic labels assumed each round was strictly better than the previous. This was incorrect for most functions and introduced systematic directional errors for five rounds — most visibly for f5, which lost approximately 1,100 score units before correction.
+Function stationarity: Returning to previously high-scoring coordinates is assumed to reproduce similar scores. If the oracle has any stochastic component this may not hold.
+Local smoothness: The neural network surrogate assumes the response surface is smooth enough for gradient navigation. Functions with sharp discontinuities (likely f1) violate this.
+Best observed = best reachable: The score-guided strategy assumes the historical best point is a reliable target. Better global regions may exist but were never sampled.
 
-1. **Monotonic improvement assumption (Rounds 3–8):** Synthetic labels assumed each round was strictly better than the previous. This was incorrect for most functions and introduced systematic directional errors into the surrogate for five rounds.
 
-2. **Function stationarity:** Returning to previously high-scoring coordinates is assumed to reproduce similar scores. If the oracle has a stochastic component, this assumption may not hold.
+Key limitations:
 
-3. **Local smoothness:** The neural network surrogate assumes the response surface is smooth enough for gradient-based navigation to be meaningful. Functions with sharp discontinuities or narrow peaks (likely f1) violate this assumption.
 
-4. **Progressive improvement:** The score-guided strategy from Round 9 onward assumes that the best observed score is a reliable indicator of the best reachable score in the neighbourhood, which may miss better global regions.
+No uncertainty quantification: The surrogate provides point estimates only. A Gaussian Process (GPyTorch) would provide posterior uncertainty enabling principled exploration of high-uncertainty regions.
+Sparse data: 13 points per function is insufficient to reliably characterise response surfaces, especially in 6D (f7) and 8D (f8).
+f1 unsolved: Near-zero scores across all thirteen rounds. Current gradient-based approach cannot locate a narrow peak without first landing near it.
+Missing early scores: Rounds 1, 2 and 11 scores not available, limiting the completeness of the training history.
 
-**Key limitations:**
 
-- **No uncertainty quantification:** The surrogate provides point estimates only. A Gaussian Process surrogate (e.g. GPyTorch) would provide posterior uncertainty, enabling principled exploration of high-uncertainty regions — the standard approach in production Bayesian optimisation.
-- **Sparse data:** 10 points per function is insufficient to reliably characterise response surfaces, especially in 6D (f7) and 8D (f8).
-- **f1 remains unsolved:** Near-zero scores across all ten rounds suggest the function peak is in a narrow region not yet sampled. The current gradient-based approach cannot detect it without first landing near it.
-- **Boundary issues:** Several functions repeatedly hit [0,1] boundaries (f3, f5), distorting gradient estimates near the edges of the input domain.
 
----
+Ethical Considerations
 
-## Ethical Considerations
+Transparency and reproducibility:
+The strategy is fully documented and reproducible. Every round's coordinates are stored in data_loader.py, the complete code with inline reasoning is in main.py, and the runtime output explicitly prints score trend, best historical week, and decision rationale for each function. Any researcher with repository access can reproduce all queries and understand exactly why each coordinate was chosen.
 
-**Transparency and reproducibility:**
-The strategy is fully documented and reproducible. Every round's query coordinates are stored in `data_loader.py`, the complete code with inline reasoning is in `main.py`, and the runtime output explicitly prints the score trend, best historical week, and decision rationale for each function. Any researcher with access to the repository can reproduce all queries and understand exactly why each coordinate was chosen.
+Limitations of transparency:
+Documenting a flawed decision process clearly is valuable for learning but does not make the decisions correct. For Rounds 3–8, the strategy was confident in directions that real scores later revealed to be wrong. Interpretability and transparency are necessary but not sufficient conditions for trustworthy ML systems.
 
-**Limitations of transparency:**
-Transparency in documentation does not eliminate the underlying epistemic problem: for Rounds 3–8, the strategy was confident in directions that real scores later revealed to be wrong. Documenting a flawed decision process clearly is valuable for learning but does not make the decisions correct. This is an important lesson for real-world ML deployment: interpretability and transparency are necessary but not sufficient conditions for trustworthy systems.
-
-**Broader applicability:**
+Broader applicability:
 The BBO capstone mirrors real-world scenarios — drug discovery, materials optimisation, engineering design — where each evaluation is expensive, feedback is delayed, and ground truth is unavailable during the search. The discipline of documenting assumptions, flagging when they were violated, and updating the strategy when evidence contradicts them is directly transferable to these high-stakes domains.
+
+The most important lesson:
+Real feedback always supersedes model assumptions. A confident model trained on wrong labels is worse than no model at all. Invest in signal quality before model sophistication.
